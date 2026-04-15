@@ -1,4 +1,4 @@
-# =================== PigAIStickers.py ===================
+# =================== PigAIStickers.py (исправленный) ===================
 # meta developer: @Kilka_Young
 # scope: hikka_only
 # scope: hikka_min 1.6.3
@@ -45,7 +45,7 @@ CHANNEL_USERNAME = "mypigAI"
 OWNER_USERNAME = "Kilka_Young"
 
 def pe(emoji: str, eid: str) -> str:
-    return f'<emoji id="{eid}">{emoji}</emoji>'
+    return f'<emoji document_id="{eid}">{emoji}</emoji>'
 
 def validate_short_name(name: str) -> bool:
     return bool(re.fullmatch(r"[a-z0-9_]{1,64}", name))
