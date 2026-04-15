@@ -1,460 +1,305 @@
-# =================== PigAIStickers.py (исправленный) ===================
+# █▀▄▀█ █▀▀ ▀█▀ ▄▀█   █▀▄ █▀▀ █░█ █▀▀ █░░ █▀█ █▀█ █▀▀ █▀█
+# █░▀░█ ██▄ ░█░ █▀█   █▄▀ ██▄ ▀▄▀ ██▄ █▄▄ █▄█ █▀▀ ██▄ █▀▄
 # meta developer: @Kilka_Young
-# scope: hikka_only
-# scope: hikka_min 1.6.3
-# requires: Pillow
-# channel: @mypigAI
+# meta name: TempMail
+# requires: aiohttp
 
+import logging
 import asyncio
-import io
-import json
-import os
+import aiohttp
+import random
+import string
+import time
 import re
-import gzip
-from typing import Dict, List, Any, Optional
-
-from PIL import Image
-
-from telethon.tl import functions, types
-from telethon.tl.types import (
-    DocumentAttributeSticker,
-    DocumentAttributeCustomEmoji,
-    InputStickerSetShortName,
-    InputStickerSetID,
-    InputStickerSetEmpty,
-    Message,
-    MessageEntityCustomEmoji,
-)
-
+from telethon.tl.types import Message
 from .. import loader, utils
 
-# Кастомные ID для премиум-эмодзи (интерфейс)
-PE = {
-    "ok": "5870633910337015697",
-    "err": "5870657884844462243",
-    "sticker": "5886285355279193209",
-    "pack": "5778672437122045013",
-    "link": "5769289093221454192",
-    "stats": "5870921681735781843",
-    "clock": "5983150113483134607",
-    "write": "5870753782874246579",
-}
+logger = logging.getLogger(__name__)
 
-# Канал и владелец для брендирования паков
-CHANNEL_USERNAME = "mypigAI"
-OWNER_USERNAME = "Kilka_Young"
-
-def pe(emoji: str, eid: str) -> str:
-    return f'<emoji document_id="{eid}">{emoji}</emoji>'
-
-def validate_short_name(name: str) -> bool:
-    return bool(re.fullmatch(r"[a-z0-9_]{1,64}", name))
-
-async def upload_sticker_item(client, me_entity, uploaded_file, mime: str, emoji_str: str, is_emoji_pack: bool):
-    """Загружает файл стикера/эмодзи и подготавливает его для добавления в пак."""
-    if is_emoji_pack:
-        sticker_attr = types.DocumentAttributeCustomEmoji(
-            alt=emoji_str,
-            stickerset=types.InputStickerSetEmpty(),
-            free=False,
-            text_color=False,
-        )
-    else:
-        sticker_attr = types.DocumentAttributeSticker(
-            alt=emoji_str,
-            stickerset=types.InputStickerSetEmpty(),
-        )
-    if mime == "application/x-tgsticker":
-        media = types.InputMediaUploadedDocument(
-            file=uploaded_file,
-            mime_type="application/x-tgsticker",
-            attributes=[types.DocumentAttributeFilename(file_name="sticker.tgs"), sticker_attr],
-        )
-    else:
-        media = types.InputMediaUploadedDocument(
-            file=uploaded_file,
-            mime_type="image/webp",
-            attributes=[types.DocumentAttributeFilename(file_name="sticker.webp"), sticker_attr],
-        )
-    result = await client(functions.messages.UploadMediaRequest(peer=me_entity, media=media))
-    real_doc = result.document
-    return types.InputStickerSetItem(
-        document=types.InputDocument(
-            id=real_doc.id,
-            access_hash=real_doc.access_hash,
-            file_reference=real_doc.file_reference,
-        ),
-        emoji=emoji_str,
-    )
+MAIL_API = "https://api.mail.tm"
+EMAIL_LIFETIME = 10 * 60
 
 @loader.tds
-class PigAIStickersMod(loader.Module):
-    """Создание эмодзи-паков и стикеров для @mypigAI"""
+class TempMailMod(loader.Module):
+    """Модуль для создания временных почт (mail.tm). Поддерживает выдачу доступа другим пользователям."""
+    
+    strings = {
+        "name": "TempMail",
+        "email_created": "<b>✅ Временная почта создана!</b>\n\n📧 <b>Адрес:</b> <code>{}</code>\n⏳ <b>Действует до:</b> <code>{}</code>\n\n<i>Письма будут приходить сюда автоматически.</i>",
+        "wait_cooldown": "<b>⏳ Подождите, создавать почту можно не чаще раза в 30 секунд.</b>",
+        "added_user": "<b>✅ Пользователь <code>{}</code> добавлен в список доверенных.</b>",
+        "removed_user": "<b>❌ Пользователь <code>{}</code> удален из списка доверенных.</b>",
+        "no_email": "<b>❌ Активная почта не найдена.</b>",
+        "new_mail": "<b>📨 Новое письмо!</b>\n\n📧 <b>На почту:</b> <code>{}</code>\n👤 <b>От:</b> <code>{}</code>\n📝 <b>Тема:</b> {}\n\n<b>Текст:</b>\n<blockquote>{}</blockquote>"
+    }
 
-    strings = {"name": "PigAIStickers"}
+    async def client_ready(self, client, db):
+        self.client = client
+        self.db = db
+        
+        # Инициализация хранилища в БД модуля
+        if not self.get("allowed_users"):
+            self.set("allowed_users", [])
+        if not self.get("emails"):
+            self.set("emails", {})
+            
+        # Запускаем фоновую задачу на проверку писем
+        self.check_task = asyncio.create_task(self.mail_checker())
 
-    def __init__(self):
-        self._sessions: Dict[int, Dict[str, Any]] = {}
+    async def on_unload(self):
+        if hasattr(self, "check_task"):
+            self.check_task.cancel()
 
-    @loader.command()
-    async def apig(self, message: Message):
-        """<reply to premium emoji> - Создать эмодзи-пак из одного премиум-эмодзи."""
-        reply = await message.get_reply_message()
-        if not reply:
-            await utils.answer(message, pe("❌", PE["err"]) + " Ответьте на сообщение с премиум-эмодзи.")
-            return
+    async def get_domain(self):
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{MAIL_API}/domains", timeout=10) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    domains = data.get("hydra:member", [])
+                    if domains:
+                        return domains[0]["domain"]
+        return None
 
-        target_doc = None
-        target_set_id = None
-        is_emoji = False
+    async def _create_email(self):
+        domain = await self.get_domain()
+        if not domain: 
+            return None
+            
+        address = "".join(random.choices(string.ascii_lowercase + string.digits, k=10)) + f"@{domain}"
+        password = "".join(random.choices(string.ascii_lowercase + string.digits, k=16))
+        
+        async with aiohttp.ClientSession() as s:
+            async with s.post(f"{MAIL_API}/accounts", json={"address": address, "password": password}, timeout=10) as r:
+                if r.status not in (200, 201): return None
+            async with s.post(f"{MAIL_API}/token", json={"address": address, "password": password}, timeout=10) as r:
+                if r.status == 200:
+                    t = await r.json()
+                    return {"address": address, "password": password, "token": t.get("token")}
+        return None
 
-        if reply.sticker:
-            doc = reply.sticker
-            for attr in doc.attributes:
-                if isinstance(attr, DocumentAttributeSticker):
-                    ss = attr.stickerset
-                    if isinstance(ss, (InputStickerSetShortName, InputStickerSetID)):
-                        target_doc, target_set_id = doc, ss
-                        is_emoji = False
-                        break
-        if not target_doc:
-            for ent in (reply.entities or []):
-                if isinstance(ent, MessageEntityCustomEmoji):
-                    emoji_docs = await self._client(
-                        functions.messages.GetCustomEmojiDocumentsRequest(document_id=[ent.document_id])
-                    )
-                    if not emoji_docs:
-                        continue
-                    doc = emoji_docs[0]
-                    for attr in doc.attributes:
-                        if isinstance(attr, (DocumentAttributeCustomEmoji, DocumentAttributeSticker)):
-                            ss = getattr(attr, "stickerset", None)
-                            if ss and not isinstance(ss, InputStickerSetEmpty):
-                                target_doc, target_set_id = doc, ss
-                                is_emoji = True
-                                break
-                    if target_doc:
-                        break
+    async def _get_messages(self, token):
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{MAIL_API}/messages", headers={"Authorization": f"Bearer {token}"}, timeout=10) as r:
+                if r.status == 200:
+                    return (await r.json()).get("hydra:member", [])
+        return []
 
-        if not target_doc:
-            await utils.answer(message, pe("❌", PE["err"]) + " Не удалось найти подходящий стикер или эмодзи.")
-            return
+    async def _get_msg_content(self, token, msg_id):
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{MAIL_API}/messages/{msg_id}", headers={"Authorization": f"Bearer {token}"}, timeout=10) as r:
+                if r.status == 200:
+                    return await r.json()
+        return None
 
-        uid = message.sender_id
-        self._sessions[uid] = {
-            "type": "emoji" if is_emoji else "sticker",
-            "doc": target_doc,
-            "set_id": target_set_id,
-            "step": "name",
-        }
-
-        await message.delete()
-        await self.inline.form(
-            text=self._step_text(uid),
-            reply_markup=self._step_markup(uid),
-            message=message
-        )
-
-    @loader.command()
-    async def apigpack(self, message: Message):
-        """<reply to a sticker/emoji pack> - Создать пак из 90 эмодзи/стикеров."""
-        reply = await message.get_reply_message()
-        if not reply:
-            await utils.answer(message, pe("❌", PE["err"]) + " Ответьте на стикер или премиум эмодзи из целевого пака.")
-            return
-
-        target_set_id = None
-        is_emoji = False
-        if reply.sticker:
-            doc = reply.sticker
-            for attr in doc.attributes:
-                if isinstance(attr, DocumentAttributeSticker):
-                    ss = attr.stickerset
-                    if isinstance(ss, (InputStickerSetShortName, InputStickerSetID)):
-                        target_set_id = ss
-                        is_emoji = False
-                        break
-        if not target_set_id:
-            for ent in (reply.entities or []):
-                if isinstance(ent, MessageEntityCustomEmoji):
-                    emoji_docs = await self._client(
-                        functions.messages.GetCustomEmojiDocumentsRequest(document_id=[ent.document_id])
-                    )
-                    if not emoji_docs:
-                        continue
-                    doc = emoji_docs[0]
-                    for attr in doc.attributes:
-                        if isinstance(attr, (DocumentAttributeCustomEmoji, DocumentAttributeSticker)):
-                            ss = getattr(attr, "stickerset", None)
-                            if ss and not isinstance(ss, InputStickerSetEmpty):
-                                target_set_id = ss
-                                is_emoji = True
-                                break
-                    if target_set_id:
-                        break
-
-        if not target_set_id:
-            await utils.answer(message, pe("❌", PE["err"]) + " Не удалось определить исходный пак.")
-            return
-
-        try:
-            full_set = await self._client(functions.messages.GetStickerSetRequest(
-                stickerset=target_set_id,
-                hash=0
-            ))
-        except Exception as e:
-            await utils.answer(message, pe("❌", PE["err"]) + f" Не удалось загрузить пак: {e}")
-            return
-
-        uid = message.sender_id
-        self._sessions[uid] = {
-            "type": "emoji" if is_emoji else "sticker",
-            "full_set": full_set,
-            "set_id": target_set_id,
-            "step": "name",
-        }
-
-        await message.delete()
-        await self.inline.form(
-            text=self._step_text(uid, pack=True),
-            reply_markup=self._step_markup(uid, pack=True),
-            message=message
-        )
-
-    def _step_text(self, uid: int, pack: bool = False) -> str:
-        s = self._sessions[uid]
-        if pack:
-            return (
-                pe("🖌", PE["sticker"]) + " <b>Создание пака из 90 штук</b>\n\n"
-                f"Исходный пак: <b>{s['full_set'].set.title}</b>\n"
-                f"Тип: <b>{'Эмодзи' if s['type'] == 'emoji' else 'Стикеры'}</b>\n"
-                "Введите короткое имя для нового пака (a-z, 0-9, _)."
-            )
-        else:
-            return (
-                pe("🖌", PE["sticker"]) + " <b>Создание эмодзи-пака</b>\n\n"
-                "Будет создан пак с одним эмодзи/стикером.\n"
-                "Введите короткое имя для нового пака (a-z, 0-9, _)."
-            )
-
-    def _step_markup(self, uid: int, pack: bool = False):
-        return [[
-            {
-                "text": "Ввести название пака",
-                "icon_custom_emoji_id": PE["write"],
-                "input": "Введите short_name пака (a-z, 0-9, _)",
-                "handler": self._input_name_pack if pack else self._input_name,
-                "args": (uid,),
-            }
-        ]]
-
-    async def _input_name(self, call, value: str, uid: int):
-        s = self._sessions.get(uid)
-        if not s:
-            await call.answer("Сессия устарела.", show_alert=True)
-            return
-        clean = value.strip().lower()
-        if not validate_short_name(clean):
-            await call.answer("Только a-z, 0-9, _ (1-64 символа).", show_alert=True)
-            return
-
-        s["pack_name"] = f"{clean}_by_{OWNER_USERNAME}"
-        s["step"] = "processing"
-        await call.edit(text=pe("⏰", PE["clock"]) + " <b>Создаём пак...</b>")
-        asyncio.ensure_future(self._do_create_single(call, uid))
-
-    async def _input_name_pack(self, call, value: str, uid: int):
-        s = self._sessions.get(uid)
-        if not s:
-            await call.answer("Сессия устарела.", show_alert=True)
-            return
-        clean = value.strip().lower()
-        if not validate_short_name(clean):
-            await call.answer("Только a-z, 0-9, _ (1-64 символа).", show_alert=True)
-            return
-
-        s["pack_name"] = f"{clean}_by_{OWNER_USERNAME}"
-        s["step"] = "processing"
-        await call.edit(text=pe("⏰", PE["clock"]) + " <b>Создаём пак из 90 штук...</b>")
-        asyncio.ensure_future(self._do_create_pack(call, uid))
-
-    async def _do_create_single(self, call, uid: int):
-        s = self._sessions[uid]
-        doc = s["doc"]
-        pack_name = s["pack_name"]
-        pack_type = s["type"]
-
-        me = await self._client.get_me()
-        me_entity = await self._client.get_input_entity("me")
-
-        try:
-            raw = await self._client.download_media(doc, bytes)
-            mime = getattr(doc, "mime_type", "")
-            if mime == "application/x-tgsticker":
-                buf = io.BytesIO(raw)
-                buf.name = "sticker.tgs"
-            else:
-                img = Image.open(io.BytesIO(raw)).convert("RGBA")
-                img = img.resize((512, 512), Image.LANCZOS)
-                buf = io.BytesIO()
-                img.save(buf, format="WEBP", lossless=True)
-                buf.seek(0)
-                buf.name = "sticker.webp"
-
-            emoji_str = "🐷"
-            for attr in doc.attributes:
-                if isinstance(attr, (DocumentAttributeCustomEmoji, DocumentAttributeSticker)):
-                    emoji_str = getattr(attr, "alt", None) or "🐷"
-                    break
-
-            uploaded = await self._client.upload_file(buf, file_name=buf.name)
-            item = await upload_sticker_item(
-                self._client, me_entity, uploaded, mime, emoji_str, pack_type == "emoji"
-            )
-
-            is_emojis = (pack_type == "emoji")
-            await self._client(functions.stickers.CreateStickerSetRequest(
-                user_id=me.id,
-                title=f"{emoji_str} Pack by {CHANNEL_USERNAME}",
-                short_name=pack_name,
-                stickers=[item],
-                emojis=is_emojis,
-            ))
-
-            pack_link = f"https://t.me/{'addemoji/' if is_emojis else 'addstickers/'}{pack_name}"
-        except Exception as e:
-            await call.edit(text=pe("❌", PE["err"]) + f" <b>Ошибка:</b>\n<code>{e}</code>")
-            self._sessions.pop(uid, None)
-            return
-
-        self._save_stats(pack_name, pack_link, 1, pack_type)
-        await call.edit(
-            text=(
-                pe("✅", PE["ok"]) + " <b>Готово!</b>\n\n"
-                f"{pe('🐷', PE['sticker'])} Пак создан: <code>{pack_name}</code>\n"
-                f"{pe('🔗', PE['link'])} <a href='{pack_link}'>{pack_link}</a>"
-            ),
-            reply_markup=[[{"text": "Открыть пак", "icon_custom_emoji_id": PE["link"], "url": pack_link}]],
-        )
-        self._sessions.pop(uid, None)
-
-    async def _do_create_pack(self, call, uid: int):
-        s = self._sessions[uid]
-        full_set = s["full_set"]
-        pack_name = s["pack_name"]
-        pack_type = s["type"]
-
-        docs = list(full_set.documents)
-        if len(docs) > 90:
-            docs = docs[:90]
-        elif len(docs) < 90:
-            docs = docs * (90 // len(docs)) + docs[:90 % len(docs)]
-
-        total = len(docs)
-        me = await self._client.get_me()
-        me_entity = await self._client.get_input_entity("me")
-        input_stickers = []
-
-        for i, doc in enumerate(docs):
+    async def mail_checker(self):
+        """Фоновый луп для проверки новых писем (каждые 15 секунд)"""
+        while True:
+            await asyncio.sleep(15)
             try:
-                raw = await self._client.download_media(doc, bytes)
-                mime = getattr(doc, "mime_type", "")
-                if mime == "application/x-tgsticker":
-                    buf = io.BytesIO(raw)
-                    buf.name = "sticker.tgs"
-                else:
-                    img = Image.open(io.BytesIO(raw)).convert("RGBA")
-                    img = img.resize((512, 512), Image.LANCZOS)
-                    buf = io.BytesIO()
-                    img.save(buf, format="WEBP", lossless=True)
-                    buf.seek(0)
-                    buf.name = "sticker.webp"
+                now = time.time()
+                emails = self.get("emails", {})
+                updated = False
+                
+                for uid_str, data in list(emails.items()):
+                    # Если время почты истекло
+                    if data.get("expires_at", 0) < now:
+                        del emails[uid_str]
+                        updated = True
+                        try:
+                            await self.client.send_message(int(uid_str), "<b>⌛ Время действия вашей временной почты истекло.</b>")
+                        except:
+                            pass
+                        continue
+                    
+                    token = data.get("token")
+                    seen = data.get("seen_msgs", [])
+                    
+                    try:
+                        messages = await self._get_messages(token)
+                    except:
+                        continue
+                        
+                    for msg in messages:
+                        msg_id = msg.get("id")
+                        if not msg_id or msg_id in seen:
+                            continue
+                            
+                        seen.append(msg_id)
+                        updated = True
+                        
+                        try:
+                            full = await self._get_msg_content(token, msg_id)
+                        except:
+                            full = None
+                            
+                        src = full or msg
+                        sender = src.get("from", {}).get("address", "???")
+                        subject = src.get("subject", "(без темы)")
+                        
+                        # Парсинг тела письма
+                        body = ""
+                        if full:
+                            body = full.get("text", "") or ""
+                            if not body:
+                                html_body = full.get("html", [""])[0] if isinstance(full.get("html"), list) else full.get("html", "")
+                                body = re.sub(r"<[^>]+>", " ", html_body or "")
+                                body = re.sub(r"\s+", " ", body).strip()
+                        body = body.strip()[:3000] or "(пусто)"
+                        
+                        # Выделяем коды для копирования в одно нажатие
+                        body = re.sub(r'(?<!\d)(\d{4,8})(?!\d)', lambda m: f"<code>{m.group(1)}</code>", body)
+                        body = re.sub(r'\b([A-Za-z0-9]{6,32})\b', lambda m: f"<code>{m.group(1)}</code>" if re.search(r'[A-Za-z]', m.group(1)) and re.search(r'\d', m.group(1)) else m.group(0), body)
+                        
+                        body_escaped = body.replace("<", "&lt;").replace(">", "&gt;").replace("&lt;code&gt;", "<code>").replace("&lt;/code&gt;", "</code>")
+                        subject_escaped = subject.replace("<", "&lt;").replace(">", "&gt;")
+                        
+                        text = self.strings["new_mail"].format(data["address"], sender, subject_escaped, body_escaped)
+                        
+                        # Отправляем сообщение напрямую пользователю
+                        try:
+                            await self.client.send_message(int(uid_str), text)
+                        except Exception as e:
+                            logger.error(f"Failed to send mail to {uid_str}: {e}")
+                            
+                if updated:
+                    self.set("emails", emails)
+            except Exception as e:
+                logger.error(f"Mail checker error: {e}")
 
-                emoji_str = "🐷"
-                for attr in doc.attributes:
-                    if isinstance(attr, (DocumentAttributeCustomEmoji, DocumentAttributeSticker)):
-                        emoji_str = getattr(attr, "alt", None) or "🐷"
-                        break
-
-                uploaded = await self._client.upload_file(buf, file_name=buf.name)
-                item = await upload_sticker_item(
-                    self._client, me_entity, uploaded, mime, emoji_str, pack_type == "emoji"
-                )
-                input_stickers.append(item)
-
-                if total > 1:
-                    bar = "█" * (i + 1) + "░" * (total - i - 1)
-                    pct = int((i + 1) / total * 100)
-                    await call.edit(
-                        text=(
-                            pe("⏰", PE["clock"]) + " <b>Создаём пак из 90 штук...</b>\n\n"
-                            f"<code>[{bar}]</code> {pct}%\n"
-                            f"Обработано: <b>{i + 1}/{total}</b>"
-                        )
-                    )
+    async def _handle_mail_creation(self, message: Message, user_id: int):
+        """Вспомогательный метод для генерации почты"""
+        now = time.time()
+        emails = self.get("emails", {})
+        uid_str = str(user_id)
+        is_pm = message.is_private
+        
+        if uid_str in emails:
+            data = emails[uid_str]
+            if now - data.get("last_created", 0) < 30:
+                await utils.answer(message, self.strings["wait_cooldown"])
+                return
+                
+        status_msg = await utils.answer(message, "<b>⏳ Создаю почту...</b>")
+        
+        acc = await self._create_email()
+        if not acc:
+            await utils.answer(status_msg, "<b>❌ Ошибка API mail.tm</b>")
+            return
+            
+        expires_at = now + EMAIL_LIFETIME
+        emails[uid_str] = {
+            "address": acc["address"],
+            "token": acc["token"],
+            "expires_at": expires_at,
+            "last_created": now,
+            "seen_msgs": []
+        }
+        self.set("emails", emails)
+        
+        expire_str = time.strftime("%H:%M:%S", time.localtime(expires_at))
+        text = self.strings["email_created"].format(acc['address'], expire_str)
+        
+        # Если это чат, отправляем в ЛС (чтобы другие не видели почту), если ЛС — редактируем/отвечаем
+        if is_pm or message.out:
+            await utils.answer(status_msg, text)
+        else:
+            try:
+                await self.client.send_message(user_id, text)
+                await utils.answer(status_msg, "<b>✅ Почта успешно создана и отправлена вам в ЛС!</b>")
             except Exception:
-                pass
-            await asyncio.sleep(0.05)
-
-        if not input_stickers:
-            await call.edit(text=pe("❌", PE["err"]) + " Не удалось обработать ни одного стикера.")
-            self._sessions.pop(uid, None)
-            return
-
-        try:
-            is_emojis = (pack_type == "emoji")
-            await self._client(functions.stickers.CreateStickerSetRequest(
-                user_id=me.id,
-                title=f"90 Pack by {CHANNEL_USERNAME}",
-                short_name=pack_name,
-                stickers=input_stickers,
-                emojis=is_emojis,
-            ))
-            pack_link = f"https://t.me/{'addemoji/' if is_emojis else 'addstickers/'}{pack_name}"
-        except Exception as e:
-            await call.edit(text=pe("❌", PE["err"]) + f" Ошибка создания пака: <code>{e}</code>")
-            self._sessions.pop(uid, None)
-            return
-
-        self._save_stats(pack_name, pack_link, total, pack_type)
-        await call.edit(
-            text=(
-                pe("✅", PE["ok"]) + " <b>Готово!</b>\n\n"
-                f"{pe('🐷', PE['sticker'])} Пак создан: <code>{pack_name}</code>\n"
-                f"{pe('📦', PE['pack'])} Эмодзи/стикеров: <b>{total}</b> шт.\n\n"
-                f"{pe('🔗', PE['link'])} <a href='{pack_link}'>{pack_link}</a>"
-            ),
-            reply_markup=[[{"text": "Открыть пак", "icon_custom_emoji_id": PE["link"], "url": pack_link}]],
-        )
-        self._sessions.pop(uid, None)
-
-    def _save_stats(self, name, link, count, ptype):
-        stats = self.db.get("PigAIStickers", "stats", [])
-        stats.append({
-            "name": name,
-            "link": link,
-            "count": count,
-            "type": ptype,
-        })
-        self.db.set("PigAIStickers", "stats", stats)
+                await utils.answer(status_msg, "<b>❌ Не удалось отправить почту. Напишите мне в личные сообщения первым!</b>")
 
     @loader.command()
-    async def apigstats(self, message: Message):
-        """Показать статистику созданных паков."""
-        stats = self.db.get("PigAIStickers", "stats", [])
-        if not stats:
-            await utils.answer(message, pe("📊", PE["stats"]) + " Ещё ни одного пака не создано.")
-            return
+    async def tmailcmd(self, message: Message):
+        """Создать временную почту"""
+        await self._handle_mail_creation(message, message.sender_id)
 
-        lines = [
-            pe("📊", PE["stats"]) + " <b>Статистика PigAIStickers</b>\n"
-            f"Всего паков: <b>{len(stats)}</b>\n"
-        ]
-        for i, entry in enumerate(reversed(stats[-20:]), 1):
-            t_label = "🎨 Эмодзи-пак" if entry.get("type") == "emoji" else "🖼 Стикерпак"
-            lines.append(
-                f"\n<b>{i}.</b> {t_label} <code>{entry['name']}</code>\n"
-                f"   {pe('📦', PE['pack'])} <b>{entry['count']}</b> шт.\n"
-                f"   {pe('🔗', PE['link'])} <a href='{entry['link']}'>{entry['link']}</a>"
-            )
-        await utils.answer(message, "\n".join(lines), parse_mode="HTML")
+    @loader.command()
+    async def tmailclosecmd(self, message: Message):
+        """Удалить активную почту досрочно"""
+        uid_str = str(message.sender_id)
+        emails = self.get("emails", {})
+        if uid_str in emails:
+            del emails[uid_str]
+            self.set("emails", emails)
+            await utils.answer(message, "<b>🗑 Почта успешно удалена.</b>")
+        else:
+            await utils.answer(message, self.strings["no_email"])
+
+    @loader.command()
+    async def allowmailcmd(self, message: Message):
+        """<@user | reply> - Разрешить пользователю создавать почту"""
+        args = utils.get_args_raw(message)
+        reply = await message.get_reply_message()
+        user = None
+        
+        if reply:
+            user = reply.sender_id
+        elif args:
+            try:
+                user_entity = await self.client.get_entity(args)
+                user = user_entity.id
+            except:
+                return await utils.answer(message, "<b>❌ Пользователь не найден.</b>")
+                
+        if not user:
+            return await utils.answer(message, "<b>❌ Укажите пользователя (реплай или @username).</b>")
+            
+        allowed = self.get("allowed_users", [])
+        if user not in allowed:
+            allowed.append(user)
+            self.set("allowed_users", allowed)
+            
+        await utils.answer(message, self.strings["added_user"].format(user))
+
+    @loader.command()
+    async def denymailcmd(self, message: Message):
+        """<@user | reply> - Запретить пользователю создавать почту"""
+        args = utils.get_args_raw(message)
+        reply = await message.get_reply_message()
+        user = None
+        
+        if reply:
+            user = reply.sender_id
+        elif args:
+            try:
+                user_entity = await self.client.get_entity(args)
+                user = user_entity.id
+            except:
+                return await utils.answer(message, "<b>❌ Пользователь не найден.</b>")
+                
+        if not user:
+            return await utils.answer(message, "<b>❌ Укажите пользователя (реплай или @username).</b>")
+            
+        allowed = self.get("allowed_users", [])
+        if user in allowed:
+            allowed.remove(user)
+            self.set("allowed_users", allowed)
+            
+        await utils.answer(message, self.strings["removed_user"].format(user))
+
+    @loader.watcher()
+    async def watcher(self, message: Message):
+        """Перехватчик сообщений для работы команд у доверенных пользователей"""
+        if not isinstance(message, Message) or not message.raw_text:
+            return
+            
+        me = await self.client.get_me()
+        if message.sender_id == me.id:
+            return  # Свои команды обрабатываются через @loader.command
+            
+        text = message.raw_text.lower()
+        if text.startswith((".tmail", "/tmail")):
+            allowed = self.get("allowed_users", [])
+            if message.sender_id in allowed:
+                if text.startswith((".tmailclose", "/tmailclose")):
+                    uid_str = str(message.sender_id)
+                    emails = self.get("emails", {})
+                    if uid_str in emails:
+                        del emails[uid_str]
+                        self.set("emails", emails)
+                        await utils.answer(message, "<b>🗑 Почта успешно удалена.</b>")
+                    else:
+                        await utils.answer(message, self.strings["no_email"])
+                else:
+                    await self._handle_mail_creation(message, message.sender_id)
