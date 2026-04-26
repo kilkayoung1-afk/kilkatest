@@ -55,8 +55,9 @@ USER_AGENT = (
 MAX_TGS_SIZE = 64 * 1024  # Telegram sticker limit
 CANVAS = 512
 ANALYZE_SIZE = 96  # downscale used for image analysis
-_SMART_MIN_SCORE = 0.45  # threshold below which we fall back to meme caption
-_SMART_MIN_SIZE = 56  # smallest font size we consider in smart mode (smaller → fallback)
+_SMART_MIN_SCORE = 0.30  # threshold below which we fall back to meme caption
+_SMART_MIN_SIZE = 40  # smallest font size we consider in smart mode (smaller → fallback)
+_SMART_MIN_COVERAGE = 0.85  # min fraction of the text rect that must lie on opaque pixels
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -135,7 +136,7 @@ def _best_position_for(
     *,
     canvas: int,
     padding: float = 0.10,
-    min_coverage: float = 0.92,
+    min_coverage: float = _SMART_MIN_COVERAGE,
 ):
     """
     Scan the analysis bitmap for the best canvas position to place a
@@ -309,6 +310,80 @@ def _render_caption(
     return data
 
 
+def _scale_tgs_to(tgs_data: bytes, target: int) -> bytes:
+    """
+    Re-pack a .tgs animation into a `target × target` logical canvas.
+
+    Telegram requires animated *custom emoji* (`stickers.CreateStickerSet
+    emojis=True`) to ship with a 100×100 logical canvas — feeding it the
+    standard 512×512 sticker .tgs gets the upload rejected.
+
+    We do this at the JSON level by wrapping every existing top-level layer in
+    a fresh PreComp asset and adding a single PreComp layer whose transform
+    scales the wrapped content down by `target / src`. That way the original
+    animation timings, layer relationships and shape data are preserved
+    untouched — only the outer viewport changes.
+    """
+    raw = gzip.decompress(tgs_data)
+    data = json.loads(raw)
+    src_w = int(data.get("w") or 512)
+    src_h = int(data.get("h") or 512)
+    if src_w == target and src_h == target:
+        return tgs_data
+    if not data.get("layers"):
+        return tgs_data
+
+    sx = target / src_w
+    sy = target / src_h
+
+    asset_id = "_nftgift_wrap"
+    # Avoid colliding with an existing asset id.
+    existing_ids = {a.get("id") for a in data.get("assets", [])}
+    n = 0
+    while asset_id in existing_ids:
+        n += 1
+        asset_id = f"_nftgift_wrap_{n}"
+
+    ip = data.get("ip", 0)
+    op = data.get("op", 60)
+
+    data.setdefault("assets", []).append(
+        {"id": asset_id, "layers": data["layers"]}
+    )
+
+    data["layers"] = [
+        {
+            "ddd": 0,
+            "ind": 0,
+            "ty": 0,  # PreComp layer
+            "nm": "nftgift_wrap",
+            "refId": asset_id,
+            "sr": 1,
+            "ks": {
+                "o": {"a": 0, "k": 100},
+                "r": {"a": 0, "k": 0},
+                "p": {"a": 0, "k": [target / 2, target / 2, 0]},
+                "a": {"a": 0, "k": [src_w / 2, src_h / 2, 0]},
+                "s": {"a": 0, "k": [sx * 100, sy * 100, 100]},
+            },
+            "ao": 0,
+            "w": src_w,
+            "h": src_h,
+            "ip": ip,
+            "op": op,
+            "st": 0,
+            "bm": 0,
+        }
+    ]
+    data["w"] = target
+    data["h"] = target
+
+    out = io.BytesIO()
+    with gzip.GzipFile(fileobj=out, mode="wb", compresslevel=9, mtime=0) as gz:
+        gz.write(json.dumps(data, separators=(",", ":")).encode("utf-8"))
+    return out.getvalue()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Module
 # ─────────────────────────────────────────────────────────────────────────────
@@ -324,10 +399,11 @@ class NFTGiftMod(loader.Module):
             "ℹ️ <b>Использование</b>\n"
             "<code>{prefix}nftgift &lt;ссылка&gt; | &lt;текст&gt;</code>\n"
             "<code>{prefix}nftgift &lt;ссылка&gt; | &lt;текст&gt; | 🥳</code>  "
-            "— задать свой эмодзи (по умолчанию 🎁)\n\n"
+            "— задать эмодзи (по умолчанию 🎁)\n"
+            "<code>{prefix}nftpack</code> — управление паком премиум-эмодзи\n\n"
             "<i>Пример:</i> <code>{prefix}nftgift t.me/nft/PlushPepe-100 | Привет!</code>\n\n"
             "Меню настроек: <code>{prefix}nftgift settings</code>\n"
-            "Также можно править параметры через <code>{prefix}config NFTGift</code>."
+            "Все параметры также правятся через <code>{prefix}config NFTGift</code>."
         ),
         "bad_link": (
             "❌ <b>Не удалось распознать ссылку.</b>\n"
@@ -336,19 +412,24 @@ class NFTGiftMod(loader.Module):
         "fetching": "⏳ <b>Скачиваю подарок…</b>",
         "no_anim": "❌ <b>Не нашёл Lottie-анимацию для этого подарка.</b>",
         "rendering": "✏️ <b>Накладываю текст…</b>",
-        "packing": "📦 <b>Добавляю в стикерпак…</b>",
-        "done_with_pack": (
-            "✅ <b>Готово.</b> Стикер добавлен в пак "
-            "<a href=\"https://t.me/addstickers/{short_name}\">{title}</a>."
+        "packing": "📦 <b>Добавляю в пак премиум-эмодзи…</b>",
+        "done_with_pack_added": (
+            "✅ <b>Готово.</b> Эмодзи добавлен в твой пак: "
+            "<a href=\"https://t.me/addemoji/{short_name}\">{title}</a>"
+        ),
+        "done_with_pack_created": (
+            "✅ <b>Готово.</b> Создан новый пак премиум-эмодзи: "
+            "<a href=\"https://t.me/addemoji/{short_name}\">{title}</a>\n"
+            "Открой ссылку, добавь пак себе — теперь твои эмодзи доступны в любом чате."
         ),
         "done_no_pack": "✅ <b>Готово.</b>",
         "pack_error": (
-            "⚠️ <b>Стикер отправлен, но не получилось добавить в пак:</b> "
+            "⚠️ <b>Стикер отправлен в чат, но в пак не добавился:</b> "
             "<code>{err}</code>"
         ),
         "too_big": (
             "❌ <b>Файл получился больше 64 KB ({size} KB).</b>\n"
-            "Telegram такое не примет. Попробуй короче текст или уменьши шрифт в конфиге."
+            "Telegram такое не примет. Сделай короче текст или меньше кегль."
         ),
         "render_error": "❌ <b>Ошибка рендера:</b> <code>{err}</code>",
         "fetch_error": "❌ <b>Ошибка загрузки:</b> <code>{err}</code>",
@@ -363,18 +444,37 @@ class NFTGiftMod(loader.Module):
             "<b>Текущие параметры:</b>\n"
             "• Умное размещение: <b>{smart}</b>\n"
             "• Авто-цвет текста: <b>{auto_color}</b>\n"
-            "• Добавлять в пак: <b>{add_to_pack}</b>\n"
+            "• Добавлять в пак премиум-эмодзи: <b>{add_to_pack}</b>\n"
             "• Эмодзи по умолчанию: <b>{default_emoji}</b>\n"
-            "• Название пака: <code>{pack_title}</code>\n"
+            "• Активный пак: <b>{active_pack}</b>\n"
             "• Шрифт: <code>{font}</code>\n"
             "• Кегль: <b>{font_size}</b>\n"
             "• Заливка / обводка: <code>#{fill}</code> / <code>#{stroke}</code>\n\n"
-            "Подробные параметры — через <code>{prefix}config NFTGift</code>."
+            "Управление паком: <code>{prefix}nftpack</code>.\n"
+            "Подробные параметры — <code>{prefix}config NFTGift</code>."
         ),
         "menu_unavailable": (
             "ℹ️ <b>Инлайн-меню недоступно</b> (вероятно, в Hikka не настроен инлайн-бот). "
             "Все параметры можно править через <code>{prefix}config NFTGift</code>:\n\n{body}"
         ),
+        "pack_status": (
+            "📦 <b>Пак премиум-эмодзи</b>\n\n"
+            "Активный пак: <b>{active}</b>\n"
+            "{link}\n\n"
+            "<b>Команды:</b>\n"
+            "• <code>{prefix}nftpack</code> — показать активный пак\n"
+            "• <code>{prefix}nftpack &lt;short_name&gt;</code> — переключиться на уже существующий пак\n"
+            "• <code>{prefix}nftpack new &lt;название&gt;</code> — следующий <code>{prefix}nftgift</code> создаст новый пак с этим названием\n"
+            "• <code>{prefix}nftpack reset</code> — забыть активный пак (следующий вызов создаст пак с дефолтным именем)"
+        ),
+        "pack_link": "🔗 https://t.me/addemoji/{short_name}",
+        "pack_no_link": "<i>Активного пака нет — будет создан при следующем вызове <code>{prefix}nftgift</code>.</i>",
+        "pack_switched": "✅ Активный пак переключён на <code>{short_name}</code>.",
+        "pack_pending_title": (
+            "✅ Имя сохранено. Следующий <code>{prefix}nftgift</code> создаст новый пак "
+            "с названием <b>{title}</b>."
+        ),
+        "pack_reset": "✅ Активный пак сброшен.",
         "set_ok": "✅ Сохранено.",
     }
 
@@ -399,20 +499,14 @@ class NFTGiftMod(loader.Module):
             loader.ConfigValue(
                 "add_to_pack",
                 True,
-                lambda: "Добавлять каждый сгенерированный стикер в твой личный NFT-Gift пак",
+                lambda: "Добавлять каждый рендер в твой пак премиум-эмодзи",
                 validator=loader.validators.Boolean(),
             ),
             loader.ConfigValue(
                 "default_emoji",
                 "🎁",
-                lambda: "Эмодзи по умолчанию для стикера, если не задан в команде",
+                lambda: "Эмодзи по умолчанию, если не указан в команде",
                 validator=loader.validators.String(min_len=1, max_len=8),
-            ),
-            loader.ConfigValue(
-                "pack_title",
-                "NFT Gift Stickers",
-                lambda: "Название твоего стикерпака (показывается при добавлении)",
-                validator=loader.validators.String(min_len=1, max_len=64),
             ),
             loader.ConfigValue(
                 "font",
@@ -486,14 +580,31 @@ class NFTGiftMod(loader.Module):
                 return obj
         return "."
 
+    # ── DB helpers ────────────────────────────────────────────────────────
+
+    _DB_KEY = "NFTGift"
+
+    def _get_active_pack(self) -> str:
+        return self.db.get(self._DB_KEY, "active_pack", "") or ""
+
+    def _set_active_pack(self, short_name: str) -> None:
+        self.db.set(self._DB_KEY, "active_pack", short_name or "")
+
+    def _get_pending_title(self) -> str:
+        return self.db.get(self._DB_KEY, "pending_pack_title", "") or ""
+
+    def _set_pending_title(self, title: str) -> None:
+        self.db.set(self._DB_KEY, "pending_pack_title", title or "")
+
     def _menu_text(self) -> str:
+        active = self._get_active_pack() or "—"
         return self.strings["menu_title"].format(
             prefix=self._prefix(),
             smart="вкл" if self.config["smart"] else "выкл",
             auto_color="вкл" if self.config["auto_color"] else "выкл",
             add_to_pack="вкл" if self.config["add_to_pack"] else "выкл",
             default_emoji=self.config["default_emoji"],
-            pack_title=utils.escape_html(str(self.config["pack_title"])),
+            active_pack=utils.escape_html(active),
             font=utils.escape_html(str(self.config["font"])),
             font_size=self.config["font_size"],
             fill=self.config["fill"],
@@ -559,20 +670,16 @@ class NFTGiftMod(loader.Module):
             ),
         )
 
-    # ── Sticker-pack management ───────────────────────────────────────────
+    # ── Premium-emoji pack management ────────────────────────────────────
 
-    async def _ensure_pack(self, tgs_data: bytes, emoji: str):
-        """
-        Upload `tgs_data` as a sticker, then add it to the user's NFT-Gift
-        pack — creating the pack if it doesn't exist yet. Returns
-        ``(short_name, title, was_created)``.
-        """
-        me = await self.client.get_me()
-        short_name = f"nftgift_{me.id}_pack"
-        title = str(self.config["pack_title"]) or "NFT Gift Stickers"
+    async def _upload_emoji_doc(self, tgs_data: bytes) -> InputDocument:
+        """Upload a 100×100 .tgs as a Telegram document and return its handle."""
+        # Telegram requires animated custom emoji to use a 100×100 logical
+        # canvas — the standard 512×512 sticker .tgs gets rejected by the
+        # CreateStickerSet/AddStickerToSet RPCs when emojis=True is set.
+        emoji_tgs = await asyncio.to_thread(_scale_tgs_to, tgs_data, 100)
 
-        # Step 1 — upload the .tgs as a Telegram document.
-        bio = io.BytesIO(tgs_data)
+        bio = io.BytesIO(emoji_tgs)
         bio.name = "nftgift.tgs"
         uploaded = await self.client.upload_file(file=bio, file_name="nftgift.tgs")
         media = await self.client(
@@ -586,51 +693,94 @@ class NFTGiftMod(loader.Module):
             )
         )
         doc = media.document
-        input_doc = InputDocument(
+        return InputDocument(
             id=doc.id,
             access_hash=doc.access_hash,
             file_reference=doc.file_reference,
         )
-        item = InputStickerSetItem(document=input_doc, emoji=emoji)
 
-        # Step 2 — try to add to existing pack; if it doesn't exist, create.
-        try:
-            await self.client(
-                GetStickerSetRequest(
-                    stickerset=InputStickerSetShortName(short_name),
-                    hash=0,
-                )
-            )
-        except StickersetInvalidError:
-            await self.client(
-                CreateStickerSetRequest(
-                    user_id=InputUserSelf(),
-                    title=title,
-                    short_name=short_name,
-                    stickers=[item],
-                )
-            )
-            return short_name, title, True
-        except ShortnameOccupyFailedError:
-            # Race: someone else just took the short name. Pick a fallback.
-            short_name = f"nftgift_{me.id}_{int(asyncio.get_event_loop().time())}_pack"
-            await self.client(
-                CreateStickerSetRequest(
-                    user_id=InputUserSelf(),
-                    title=title,
-                    short_name=short_name,
-                    stickers=[item],
-                )
-            )
-            return short_name, title, True
-
-        await self.client(
-            AddStickerToSetRequest(
-                stickerset=InputStickerSetShortName(short_name),
-                sticker=item,
+    async def _create_emoji_set(
+        self, title: str, short_name: str, item: InputStickerSetItem
+    ):
+        """Create a new premium-emoji pack containing a single emoji."""
+        return await self.client(
+            CreateStickerSetRequest(
+                user_id=InputUserSelf(),
+                title=title,
+                short_name=short_name,
+                stickers=[item],
+                emojis=True,
             )
         )
-        return short_name, title, False
+
+    async def _ensure_pack(self, tgs_data: bytes, emoji: str):
+        """
+        Upload `tgs_data` as a custom emoji and add it to the user's active
+        premium-emoji pack — creating one on first use.
+
+        Returns ``(short_name, title, was_created)``.
+
+        Pack-name policy:
+        * If ``self.db`` already stores an ``active_pack`` short_name, we add
+          to that pack. If it has been deleted, we recreate it with the same
+          short_name so the user's link stays stable.
+        * Otherwise we generate ``nftgift_<user_id>`` (with a numeric suffix
+          if Telegram complains the name is taken) and remember it.
+        * The pack title is whatever the user set via ``.nftpack new <title>``
+          last; or, on the very first call, "NFT Gift Emoji".
+        """
+        me = await self.client.get_me()
+        input_doc = await self._upload_emoji_doc(tgs_data)
+        item = InputStickerSetItem(document=input_doc, emoji=emoji)
+
+        active = self._get_active_pack()
+        pending_title = self._get_pending_title()
+
+        # ── Existing active pack: try to add to it ────────────────────────
+        if active:
+            try:
+                info = await self.client(
+                    GetStickerSetRequest(
+                        stickerset=InputStickerSetShortName(active),
+                        hash=0,
+                    )
+                )
+                title = info.set.title
+                await self.client(
+                    AddStickerToSetRequest(
+                        stickerset=InputStickerSetShortName(active),
+                        sticker=item,
+                    )
+                )
+                return active, title, False
+            except StickersetInvalidError:
+                # Pack was deleted — recreate with same short_name so the
+                # user's link doesn't change. Use the pending title if set,
+                # otherwise reuse the previous short_name as a fallback title.
+                title = pending_title or active
+                await self._create_emoji_set(title, active, item)
+                self._set_pending_title("")
+                return active, title, True
+
+        # ── No active pack: create a new one ─────────────────────────────
+        title = pending_title or "NFT Gift Emoji"
+        base = f"nftgift_{me.id}"
+        candidates = [base] + [f"{base}_{n}" for n in range(2, 12)]
+        # And finally a timestamp-based fallback if all the simple ones collide.
+        candidates.append(f"{base}_{int(asyncio.get_event_loop().time())}")
+
+        last_err = None
+        for short_name in candidates:
+            try:
+                await self._create_emoji_set(title, short_name, item)
+            except ShortnameOccupyFailedError as exc:
+                last_err = exc
+                continue
+            self._set_active_pack(short_name)
+            self._set_pending_title("")
+            return short_name, title, True
+
+        raise last_err or RuntimeError("could not allocate a pack short_name")
 
     # ── Command ───────────────────────────────────────────────────────────
 
@@ -722,15 +872,16 @@ class NFTGiftMod(loader.Module):
             reply_to=message.reply_to_msg_id,
         )
 
-        # Try to add to the user's personal pack — but never let this break the
+        # Try to add to the user's premium-emoji pack — but never let this break the
         # primary "send sticker" flow.
         if bool(self.config["add_to_pack"]):
             try:
                 await utils.answer(message, self.strings["packing"])
-                short_name, title, _ = await self._ensure_pack(data, emoji)
+                short_name, title, was_created = await self._ensure_pack(data, emoji)
+                key = "done_with_pack_created" if was_created else "done_with_pack_added"
                 await utils.answer(
                     message,
-                    self.strings["done_with_pack"].format(
+                    self.strings[key].format(
                         short_name=short_name,
                         title=utils.escape_html(title),
                     ),
@@ -744,3 +895,83 @@ class NFTGiftMod(loader.Module):
             return
 
         await utils.answer(message, self.strings["done_no_pack"])
+
+    # ── Pack management command ───────────────────────────────────────────
+
+    @loader.command(
+        ru_doc=(
+            "[short_name | new <название> | reset] — управление паком премиум-эмодзи: "
+            "показать активный, переключиться на существующий, подготовить новый, или сбросить."
+        ),
+    )
+    async def nftpack(self, message: Message):
+        """[short_name | new <title> | reset] — manage your premium-emoji pack."""
+        args = (utils.get_args_raw(message) or "").strip()
+
+        if not args:
+            active = self._get_active_pack()
+            link = (
+                self.strings["pack_link"].format(short_name=active)
+                if active
+                else self.strings["pack_no_link"].format(prefix=self._prefix())
+            )
+            await utils.answer(
+                message,
+                self.strings["pack_status"].format(
+                    prefix=self._prefix(),
+                    active=utils.escape_html(active or "—"),
+                    link=link,
+                ),
+            )
+            return
+
+        first, _, rest = args.partition(" ")
+        first_lc = first.lower()
+
+        if first_lc == "reset":
+            self._set_active_pack("")
+            self._set_pending_title("")
+            await utils.answer(message, self.strings["pack_reset"])
+            return
+
+        if first_lc == "new":
+            title = rest.strip()
+            if not title:
+                await utils.answer(
+                    message,
+                    self.strings["pack_status"].format(
+                        prefix=self._prefix(),
+                        active=utils.escape_html(self._get_active_pack() or "—"),
+                        link=self.strings["pack_no_link"].format(prefix=self._prefix()),
+                    ),
+                )
+                return
+            # Forget the old active pack so the next .nftgift creates a fresh one.
+            self._set_active_pack("")
+            self._set_pending_title(title)
+            await utils.answer(
+                message,
+                self.strings["pack_pending_title"].format(
+                    prefix=self._prefix(),
+                    title=utils.escape_html(title),
+                ),
+            )
+            return
+
+        # Otherwise treat the argument as a short_name to switch to.
+        short_name = first.lstrip("@").strip()
+        # Strip "https://t.me/addemoji/<name>" or "https://t.me/addstickers/<name>".
+        m = re.search(r"(?:addemoji|addstickers)/([A-Za-z0-9_]+)", short_name)
+        if m:
+            short_name = m.group(1)
+        if not short_name:
+            await utils.answer(message, self.strings["bad_link"])
+            return
+        self._set_active_pack(short_name)
+        self._set_pending_title("")
+        await utils.answer(
+            message,
+            self.strings["pack_switched"].format(
+                short_name=utils.escape_html(short_name),
+            ),
+        )
