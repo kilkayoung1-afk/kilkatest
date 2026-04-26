@@ -1,4 +1,3 @@
-# meta developer: @Kilka_Young
 # meta name: NFTGift
 # requires: aiohttp lottie fonttools cairosvg Pillow numpy
 
@@ -7,7 +6,9 @@ NFT Gift caption module for Hikka userbot.
 
 Скачивает Lottie-анимацию NFT-подарка Telegram (например, t.me/nft/PlushPepe-100),
 сам выбирает на анимации лучшее место для подписи (например, на сердечке у Plush Pepe),
-аккуратно вписывает туда твой текст и отправляет результат анимированным стикером (.tgs).
+аккуратно вписывает туда твой текст, отправляет результат анимированным стикером
+и автоматически добавляет его в твой личный стикерпак (создаст при первом
+вызове, без помощи бота @Stickers).
 """
 
 import asyncio
@@ -19,7 +20,25 @@ import re
 import subprocess
 
 import aiohttp
-from telethon.tl.types import DocumentAttributeFilename, Message
+from telethon.errors.rpcerrorlist import (
+    StickersetInvalidError,
+    ShortnameOccupyFailedError,
+)
+from telethon.tl.functions.messages import GetStickerSetRequest, UploadMediaRequest
+from telethon.tl.functions.stickers import (
+    AddStickerToSetRequest,
+    CreateStickerSetRequest,
+)
+from telethon.tl.types import (
+    DocumentAttributeFilename,
+    InputDocument,
+    InputMediaUploadedDocument,
+    InputPeerSelf,
+    InputStickerSetItem,
+    InputStickerSetShortName,
+    InputUserSelf,
+    Message,
+)
 
 from .. import loader, utils
 
@@ -297,15 +316,18 @@ def _render_caption(
 
 @loader.tds
 class NFTGiftMod(loader.Module):
-    """Накладывает свой текст на Lottie-анимацию NFT-подарка Telegram. By @Kilka_Young"""
+    """Накладывает свой текст на Lottie-анимацию NFT-подарка Telegram и складывает результат в личный стикерпак."""
 
     strings = {
         "name": "NFTGift",
         "no_args": (
-            "❌ <b>Использование:</b>\n"
-            "<code>{prefix}nftgift &lt;ссылка&gt; | &lt;текст&gt;</code>\n\n"
+            "ℹ️ <b>Использование</b>\n"
+            "<code>{prefix}nftgift &lt;ссылка&gt; | &lt;текст&gt;</code>\n"
+            "<code>{prefix}nftgift &lt;ссылка&gt; | &lt;текст&gt; | 🥳</code>  "
+            "— задать свой эмодзи (по умолчанию 🎁)\n\n"
             "<i>Пример:</i> <code>{prefix}nftgift t.me/nft/PlushPepe-100 | Привет!</code>\n\n"
-            "Настройки: <code>{prefix}nftgift settings</code>"
+            "Меню настроек: <code>{prefix}nftgift settings</code>\n"
+            "Также можно править параметры через <code>{prefix}config NFTGift</code>."
         ),
         "bad_link": (
             "❌ <b>Не удалось распознать ссылку.</b>\n"
@@ -314,6 +336,16 @@ class NFTGiftMod(loader.Module):
         "fetching": "⏳ <b>Скачиваю подарок…</b>",
         "no_anim": "❌ <b>Не нашёл Lottie-анимацию для этого подарка.</b>",
         "rendering": "✏️ <b>Накладываю текст…</b>",
+        "packing": "📦 <b>Добавляю в стикерпак…</b>",
+        "done_with_pack": (
+            "✅ <b>Готово.</b> Стикер добавлен в пак "
+            "<a href=\"https://t.me/addstickers/{short_name}\">{title}</a>."
+        ),
+        "done_no_pack": "✅ <b>Готово.</b>",
+        "pack_error": (
+            "⚠️ <b>Стикер отправлен, но не получилось добавить в пак:</b> "
+            "<code>{err}</code>"
+        ),
         "too_big": (
             "❌ <b>Файл получился больше 64 KB ({size} KB).</b>\n"
             "Telegram такое не примет. Попробуй короче текст или уменьши шрифт в конфиге."
@@ -327,28 +359,27 @@ class NFTGiftMod(loader.Module):
         ),
         "menu_title": (
             "🎁 <b>NFTGift — настройки</b>\n\n"
-            "Команда: <code>{prefix}nftgift &lt;ссылка&gt; | &lt;текст&gt;</code>\n\n"
+            "Команда: <code>{prefix}nftgift &lt;ссылка&gt; | &lt;текст&gt; [| эмодзи]</code>\n\n"
             "<b>Текущие параметры:</b>\n"
             "• Умное размещение: <b>{smart}</b>\n"
             "• Авто-цвет текста: <b>{auto_color}</b>\n"
+            "• Добавлять в пак: <b>{add_to_pack}</b>\n"
+            "• Эмодзи по умолчанию: <b>{default_emoji}</b>\n"
+            "• Название пака: <code>{pack_title}</code>\n"
             "• Шрифт: <code>{font}</code>\n"
-            "• Кегль (стартовый): <b>{font_size}</b>\n"
-            "• Заливка / обводка: <code>#{fill}</code> / <code>#{stroke}</code>\n"
-            "• Запасная Y-координата: <b>{y_offset}</b>\n"
-            "• Доля ширины: <b>{ratio}</b>"
+            "• Кегль: <b>{font_size}</b>\n"
+            "• Заливка / обводка: <code>#{fill}</code> / <code>#{stroke}</code>\n\n"
+            "Подробные параметры — через <code>{prefix}config NFTGift</code>."
         ),
-        "ask_font": "Введи fontconfig-запрос (например, <code>DejaVu Sans:weight=bold</code>):",
-        "ask_size": "Введи стартовый размер шрифта (12..200):",
-        "ask_fill": "Введи цвет заливки в HEX (без #):",
-        "ask_stroke": "Введи цвет обводки в HEX (без #):",
-        "ask_yoffset": f"Введи запасную Y-координату (0..{CANVAS}):",
-        "ask_ratio": "Введи долю ширины холста для текста (например, 0.85):",
+        "menu_unavailable": (
+            "ℹ️ <b>Инлайн-меню недоступно</b> (вероятно, в Hikka не настроен инлайн-бот). "
+            "Все параметры можно править через <code>{prefix}config NFTGift</code>:\n\n{body}"
+        ),
         "set_ok": "✅ Сохранено.",
-        "set_bad": "❌ Не удалось распарсить значение.",
     }
 
     strings_ru = {
-        "_cls_doc": "Накладывает свой текст на Lottie-анимацию NFT-подарка Telegram. By @Kilka_Young",
+        "_cls_doc": "Накладывает свой текст на Lottie-анимацию NFT-подарка Telegram и складывает результат в личный стикерпак.",
     }
 
     def __init__(self):
@@ -366,6 +397,24 @@ class NFTGiftMod(loader.Module):
                 validator=loader.validators.Boolean(),
             ),
             loader.ConfigValue(
+                "add_to_pack",
+                True,
+                lambda: "Добавлять каждый сгенерированный стикер в твой личный NFT-Gift пак",
+                validator=loader.validators.Boolean(),
+            ),
+            loader.ConfigValue(
+                "default_emoji",
+                "🎁",
+                lambda: "Эмодзи по умолчанию для стикера, если не задан в команде",
+                validator=loader.validators.String(min_len=1, max_len=8),
+            ),
+            loader.ConfigValue(
+                "pack_title",
+                "NFT Gift Stickers",
+                lambda: "Название твоего стикерпака (показывается при добавлении)",
+                validator=loader.validators.String(min_len=1, max_len=64),
+            ),
+            loader.ConfigValue(
                 "font",
                 "sans:weight=bold",
                 lambda: "Шрифт (fontconfig-запрос, например 'DejaVu Sans:weight=bold')",
@@ -373,8 +422,8 @@ class NFTGiftMod(loader.Module):
             ),
             loader.ConfigValue(
                 "font_size",
-                100,
-                lambda: "Стартовый кегль (модуль авто-уменьшит, чтобы текст влез)",
+                140,
+                lambda: "Стартовый кегль (модуль сам подберёт меньше при необходимости)",
                 validator=loader.validators.Integer(minimum=12, maximum=400),
             ),
             loader.ConfigValue(
@@ -423,76 +472,7 @@ class NFTGiftMod(loader.Module):
                 resp.raise_for_status()
                 return await resp.read()
 
-    # ── Inline settings menu ──────────────────────────────────────────────
-
-    def _menu_text(self) -> str:
-        return self.strings["menu_title"].format(
-            prefix=self._prefix(),
-            smart="вкл" if self.config["smart"] else "выкл",
-            auto_color="вкл" if self.config["auto_color"] else "выкл",
-            font=self.config["font"],
-            font_size=self.config["font_size"],
-            fill=self.config["fill"],
-            stroke=self.config["stroke"],
-            y_offset=self.config["y_offset"],
-            ratio=self.config["max_width_ratio"],
-        )
-
-    def _menu_markup(self):
-        smart = self.config["smart"]
-        auto = self.config["auto_color"]
-        return [
-            [
-                {"text": f"🧠 Умное размещение: {'✅' if smart else '❌'}",
-                 "callback": self._cb_toggle, "args": ("smart",)},
-                {"text": f"🎨 Авто-цвет: {'✅' if auto else '❌'}",
-                 "callback": self._cb_toggle, "args": ("auto_color",)},
-            ],
-            [
-                {"text": "🔤 Шрифт", "input": self.strings["ask_font"],
-                 "handler": self._cb_set, "args": ("font", "str")},
-                {"text": "🔠 Кегль", "input": self.strings["ask_size"],
-                 "handler": self._cb_set, "args": ("font_size", "int")},
-            ],
-            [
-                {"text": "🎨 Заливка", "input": self.strings["ask_fill"],
-                 "handler": self._cb_set, "args": ("fill", "hex")},
-                {"text": "🖋 Обводка", "input": self.strings["ask_stroke"],
-                 "handler": self._cb_set, "args": ("stroke", "hex")},
-            ],
-            [
-                {"text": "📐 Y запасной", "input": self.strings["ask_yoffset"],
-                 "handler": self._cb_set, "args": ("y_offset", "int")},
-                {"text": "📏 Ширина (доля)", "input": self.strings["ask_ratio"],
-                 "handler": self._cb_set, "args": ("max_width_ratio", "float_str")},
-            ],
-            [{"text": "🚪 Закрыть", "action": "close"}],
-        ]
-
-    async def _cb_toggle(self, call, key):
-        self.config[key] = not bool(self.config[key])
-        await call.edit(text=self._menu_text(), reply_markup=self._menu_markup())
-
-    async def _cb_set(self, call, value, key, kind):
-        try:
-            if kind == "int":
-                v = int(value.strip())
-            elif kind == "hex":
-                _hex_to_rgb(value)
-                v = value.strip().lstrip("#").lower()
-            elif kind == "float_str":
-                f = float(value.strip())
-                if not (0 < f <= 1):
-                    raise ValueError("ratio must be in (0, 1]")
-                v = str(f)
-            else:
-                v = value.strip()
-            self.config[key] = v
-            await call.answer(self.strings["set_ok"], show_alert=False)
-        except Exception:
-            await call.answer(self.strings["set_bad"], show_alert=True)
-            return
-        await call.edit(text=self._menu_text(), reply_markup=self._menu_markup())
+    # ── Settings ──────────────────────────────────────────────────────────
 
     def _prefix(self) -> str:
         for attr in ("get_prefix", "prefix"):
@@ -506,23 +486,171 @@ class NFTGiftMod(loader.Module):
                 return obj
         return "."
 
-    # ── Commands ──────────────────────────────────────────────────────────
+    def _menu_text(self) -> str:
+        return self.strings["menu_title"].format(
+            prefix=self._prefix(),
+            smart="вкл" if self.config["smart"] else "выкл",
+            auto_color="вкл" if self.config["auto_color"] else "выкл",
+            add_to_pack="вкл" if self.config["add_to_pack"] else "выкл",
+            default_emoji=self.config["default_emoji"],
+            pack_title=utils.escape_html(str(self.config["pack_title"])),
+            font=utils.escape_html(str(self.config["font"])),
+            font_size=self.config["font_size"],
+            fill=self.config["fill"],
+            stroke=self.config["stroke"],
+        )
+
+    def _menu_markup(self):
+        smart = self.config["smart"]
+        auto = self.config["auto_color"]
+        pack = self.config["add_to_pack"]
+        return [
+            [
+                {
+                    "text": f"🧠 Умное: {'вкл' if smart else 'выкл'}",
+                    "callback": self._cb_toggle,
+                    "args": ("smart",),
+                },
+                {
+                    "text": f"🎨 Авто-цвет: {'вкл' if auto else 'выкл'}",
+                    "callback": self._cb_toggle,
+                    "args": ("auto_color",),
+                },
+            ],
+            [
+                {
+                    "text": f"📦 Пак: {'вкл' if pack else 'выкл'}",
+                    "callback": self._cb_toggle,
+                    "args": ("add_to_pack",),
+                },
+            ],
+            [{"text": "🚪 Закрыть", "action": "close"}],
+        ]
+
+    async def _cb_toggle(self, call, key):
+        self.config[key] = not bool(self.config[key])
+        try:
+            await call.edit(text=self._menu_text(), reply_markup=self._menu_markup())
+        except Exception:
+            logger.exception("nftgift: failed to edit menu after toggle")
+            await call.answer(self.strings["set_ok"], show_alert=False)
 
     async def _send_settings(self, message: Message):
-        await self.inline.form(
-            text=self._menu_text(),
-            message=message,
-            reply_markup=self._menu_markup(),
+        # Try the inline menu first; if anything goes wrong (no inline bot,
+        # aiogram error, network glitch), fall back to plain text so the user
+        # can always see and edit settings via .config NFTGift.
+        try:
+            inline = getattr(self, "inline", None)
+            if inline is not None and hasattr(inline, "form"):
+                result = await inline.form(
+                    text=self._menu_text(),
+                    message=message,
+                    reply_markup=self._menu_markup(),
+                )
+                if result:
+                    return
+        except Exception:
+            logger.exception("nftgift: inline form failed, falling back to text")
+        await utils.answer(
+            message,
+            self.strings["menu_unavailable"].format(
+                prefix=self._prefix(),
+                body=self._menu_text(),
+            ),
         )
+
+    # ── Sticker-pack management ───────────────────────────────────────────
+
+    async def _ensure_pack(self, tgs_data: bytes, emoji: str):
+        """
+        Upload `tgs_data` as a sticker, then add it to the user's NFT-Gift
+        pack — creating the pack if it doesn't exist yet. Returns
+        ``(short_name, title, was_created)``.
+        """
+        me = await self.client.get_me()
+        short_name = f"nftgift_{me.id}_pack"
+        title = str(self.config["pack_title"]) or "NFT Gift Stickers"
+
+        # Step 1 — upload the .tgs as a Telegram document.
+        bio = io.BytesIO(tgs_data)
+        bio.name = "nftgift.tgs"
+        uploaded = await self.client.upload_file(file=bio, file_name="nftgift.tgs")
+        media = await self.client(
+            UploadMediaRequest(
+                peer=InputPeerSelf(),
+                media=InputMediaUploadedDocument(
+                    file=uploaded,
+                    mime_type="application/x-tgsticker",
+                    attributes=[DocumentAttributeFilename("nftgift.tgs")],
+                ),
+            )
+        )
+        doc = media.document
+        input_doc = InputDocument(
+            id=doc.id,
+            access_hash=doc.access_hash,
+            file_reference=doc.file_reference,
+        )
+        item = InputStickerSetItem(document=input_doc, emoji=emoji)
+
+        # Step 2 — try to add to existing pack; if it doesn't exist, create.
+        try:
+            await self.client(
+                GetStickerSetRequest(
+                    stickerset=InputStickerSetShortName(short_name),
+                    hash=0,
+                )
+            )
+        except StickersetInvalidError:
+            await self.client(
+                CreateStickerSetRequest(
+                    user_id=InputUserSelf(),
+                    title=title,
+                    short_name=short_name,
+                    stickers=[item],
+                )
+            )
+            return short_name, title, True
+        except ShortnameOccupyFailedError:
+            # Race: someone else just took the short name. Pick a fallback.
+            short_name = f"nftgift_{me.id}_{int(asyncio.get_event_loop().time())}_pack"
+            await self.client(
+                CreateStickerSetRequest(
+                    user_id=InputUserSelf(),
+                    title=title,
+                    short_name=short_name,
+                    stickers=[item],
+                )
+            )
+            return short_name, title, True
+
+        await self.client(
+            AddStickerToSetRequest(
+                stickerset=InputStickerSetShortName(short_name),
+                sticker=item,
+            )
+        )
+        return short_name, title, False
+
+    # ── Command ───────────────────────────────────────────────────────────
 
     @loader.command(
         ru_doc=(
-            "<ссылка> | <текст> — Положить свой текст поверх Lottie-анимации NFT-подарка. "
-            "Без аргументов — открыть меню настроек."
+            "<ссылка> | <текст> [| эмодзи] — Наложить текст на Lottie NFT-подарка, "
+            "отправить стикером и добавить в твой пак. Без аргументов — меню настроек."
         ),
     )
     async def nftgift(self, message: Message):
-        """<link> | <text> — Overlay text on an NFT gift Lottie animation. No args → settings menu."""
+        """<link> | <text> [| emoji] — Overlay text on an NFT gift Lottie animation,
+        send it as a sticker, and add it to the user's personal pack.
+        No args → settings."""
+        args = utils.get_args_raw(message) or ""
+
+        # Settings/help should work even if heavy libs aren't installed yet.
+        if not args.strip() or args.strip().lower() in ("settings", "config", "menu", "set"):
+            await self._send_settings(message)
+            return
+
         try:
             from lottie.parsers.tgs import parse_tgs  # noqa: F401
             from PIL import Image  # noqa: F401
@@ -531,16 +659,15 @@ class NFTGiftMod(loader.Module):
             await utils.answer(message, self.strings["lib_missing"].format(libs=str(e)))
             return
 
-        args = utils.get_args_raw(message) or ""
-        if not args.strip() or args.strip().lower() in ("settings", "config", "menu", "set"):
-            await self._send_settings(message)
-            return
-
         if "|" not in args:
             await utils.answer(message, self.strings["no_args"].format(prefix=self._prefix()))
             return
 
-        link_part, text = (s.strip() for s in args.split("|", 1))
+        parts = [p.strip() for p in args.split("|")]
+        link_part = parts[0]
+        text = parts[1] if len(parts) > 1 else ""
+        emoji = parts[2] if len(parts) > 2 and parts[2] else str(self.config["default_emoji"])
+
         slug = _parse_link(link_part)
         if not slug or not text:
             await utils.answer(message, self.strings["bad_link"])
@@ -594,8 +721,26 @@ class NFTGiftMod(loader.Module):
             attributes=[DocumentAttributeFilename("nftgift.tgs")],
             reply_to=message.reply_to_msg_id,
         )
-        if message.out:
+
+        # Try to add to the user's personal pack — but never let this break the
+        # primary "send sticker" flow.
+        if bool(self.config["add_to_pack"]):
             try:
-                await message.delete()
-            except Exception:
-                pass
+                await utils.answer(message, self.strings["packing"])
+                short_name, title, _ = await self._ensure_pack(data, emoji)
+                await utils.answer(
+                    message,
+                    self.strings["done_with_pack"].format(
+                        short_name=short_name,
+                        title=utils.escape_html(title),
+                    ),
+                )
+            except Exception as exc:
+                logger.exception("nftgift: failed to add to pack")
+                await utils.answer(
+                    message,
+                    self.strings["pack_error"].format(err=utils.escape_html(str(exc))),
+                )
+            return
+
+        await utils.answer(message, self.strings["done_no_pack"])
