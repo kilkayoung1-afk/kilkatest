@@ -36,6 +36,8 @@ USER_AGENT = (
 MAX_TGS_SIZE = 64 * 1024  # Telegram sticker limit
 CANVAS = 512
 ANALYZE_SIZE = 96  # downscale used for image analysis
+_SMART_MIN_SCORE = 0.45  # threshold below which we fall back to meme caption
+_SMART_MIN_SIZE = 56  # smallest font size we consider in smart mode (smaller → fallback)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,19 +91,8 @@ def _box_sum(ii, y0, x0, y1, x1):
     return float(ii[y1, x1] - ii[y0, x1] - ii[y1, x0] + ii[y0, x0])
 
 
-def _smart_anchor(img):
-    """
-    Find the best rectangular area on the rendered sticker frame to drop a
-    text caption onto. Returns (cx, cy, w, h, mean_brightness) in *normalized*
-    coordinates (0..1) relative to the canvas. The caller scales these to
-    Lottie units (pixels in 512×512).
-
-    Heuristic: scan rectangles of varying aspect ratios; reward (a) high alpha
-    coverage (must be on the sticker, not in the transparent margin),
-    (b) low pixel-brightness variance (smooth area), (c) extreme brightness
-    (very dark or very light, so coloured text reads well over it),
-    (d) large size.
-    """
+def _build_integrals(img):
+    """Pre-compute integral images of brightness, brightness² and alpha."""
     import numpy as np
 
     arr = np.array(img)
@@ -115,43 +106,54 @@ def _smart_anchor(img):
         out[1:, 1:] = np.cumsum(np.cumsum(a, axis=0), axis=1)
         return out
 
-    ii_b = integral(brightness)
-    ii_b2 = integral(brightness * brightness)
-    ii_a = integral(alpha)
+    return integral(brightness), integral(brightness * brightness), integral(alpha), h, w
 
+
+def _best_position_for(
+    integrals,
+    text_w: float,
+    text_h: float,
+    *,
+    canvas: int,
+    padding: float = 0.10,
+    min_coverage: float = 0.92,
+):
+    """
+    Scan the analysis bitmap for the best canvas position to place a
+    `text_w × text_h` rectangle (in canvas pixels). The score rewards smooth
+    (low pixel-brightness variance) and high-contrast (very dark / very light)
+    backgrounds that lie fully on the sticker.
+
+    Returns ``(score, cx, cy, mean_brightness)`` in canvas coordinates, or
+    ``None`` if the rectangle does not fit anywhere with the required alpha
+    coverage.
+    """
+    ii_b, ii_b2, ii_a, h, w = integrals
+    s = w / canvas
+    bw = max(4, int(text_w * (1 + padding) * s))
+    bh = max(4, int(text_h * (1 + padding) * s))
+    if bw > w or bh > h:
+        return None
+
+    n = bh * bw
     best = None
-    for h_frac in (0.45, 0.35, 0.28, 0.22, 0.16, 0.12):
-        bh = max(8, int(h * h_frac))
-        for asp in (3.5, 4.5, 6.0):
-            bw = int(bh * asp)
-            if bw > w or bh > h:
+    for y0 in range(0, h - bh + 1, 2):
+        for x0 in range(0, w - bw + 1, 2):
+            cov = _box_sum(ii_a, y0, x0, y0 + bh, x0 + bw) / n
+            if cov < min_coverage:
                 continue
-            for y0 in range(0, h - bh + 1, 2):
-                for x0 in range(0, w - bw + 1, 2):
-                    n = bh * bw
-                    cov = _box_sum(ii_a, y0, x0, y0 + bh, x0 + bw) / n
-                    if cov < 0.85:
-                        continue
-                    s = _box_sum(ii_b, y0, x0, y0 + bh, x0 + bw)
-                    s2 = _box_sum(ii_b2, y0, x0, y0 + bh, x0 + bw)
-                    mean = s / n
-                    var = max(0.0, s2 / n - mean * mean)
-                    std = var ** 0.5
-                    smooth = 1.0 - min(std * 5, 1.0)
-                    contrast = abs(mean - 0.5) * 2.0  # prefer near-black or near-white
-                    size_term = n / (h * w)
-                    score = smooth * 0.5 + contrast * 0.3 + size_term * 0.2
-                    if best is None or score > best[0]:
-                        best = (score, y0, x0, bh, bw, mean)
-
-    if best is None:
-        # Sticker is entirely empty. Fall back to bottom-centre.
-        return (0.5, 0.91, 0.85, 0.15, 0.0)
-
-    score, y0, x0, bh, bw, mean = best
-    cx = (x0 + bw / 2) / w
-    cy = (y0 + bh / 2) / h
-    return (cx, cy, bw / w, bh / h, float(mean))
+            sb = _box_sum(ii_b, y0, x0, y0 + bh, x0 + bw)
+            sb2 = _box_sum(ii_b2, y0, x0, y0 + bh, x0 + bw)
+            mean = sb / n
+            std = max(0.0, sb2 / n - mean * mean) ** 0.5
+            smooth = 1.0 - min(std * 5, 1.0)
+            contrast = abs(mean - 0.5) * 2.0
+            score = smooth * 0.5 + contrast * 0.5
+            if best is None or score > best[0]:
+                cx = (x0 + bw / 2) / s
+                cy = (y0 + bh / 2) / s
+                best = (score, cx, cy, mean)
+    return best
 
 
 def _render_caption(
@@ -170,12 +172,21 @@ def _render_caption(
     """
     Add a text caption to a .tgs sticker.
 
-    When `smart` is True, the placement (centre, max width, max height) is
-    detected from the sticker's middle frame. When False, text is centred
-    horizontally and placed at `y_offset` with `max_width_ratio` of canvas.
+    Two modes:
 
-    When `auto_color` is True (and smart is True), fill / stroke are flipped
-    automatically: bright background → dark text + light halo and vice versa.
+    * `smart=True` — render the middle frame as a small RGBA bitmap, then for
+      each candidate font size (largest first) look for a position on the
+      sticker where the text rectangle would sit on a smooth, high-contrast
+      area. The first size whose best score clears `_SMART_MIN_SCORE` wins.
+      If no size scores well enough, fall back to the meme-caption path below.
+
+    * `smart=False` (or fallback) — classic meme caption: centre the text
+      horizontally and place it near the bottom of the canvas (at the largest
+      font size that still fits). When `smart=False` is requested explicitly,
+      the user-configured `y_offset` and `max_width_ratio` are honoured.
+
+    When `auto_color` is True and the smart path picks a *light* region, the
+    fill and stroke colours are swapped so the text remains legible.
     """
     from lottie.exporters import export_tgs
     from lottie.objects import Color, Fill, ShapeLayer, Stroke
@@ -183,44 +194,76 @@ def _render_caption(
     from lottie.utils.font import FontStyle
 
     anim = parse_tgs(io.BytesIO(tgs_bytes))
-    canvas_w = anim.width
-    canvas_h = anim.height
+    canvas_w = int(anim.width)
+    canvas_h = int(anim.height)
 
+    initial = max(12, int(initial_size))
+    factors = (1.0, 0.85, 0.72, 0.60, 0.50, 0.40)
+    sizes = []
+    for fac in factors:
+        s = max(40, int(initial * fac))
+        if not sizes or sizes[-1] != s:
+            sizes.append(s)
+    if sizes[-1] > 40:
+        sizes.append(40)
+
+    integrals = None
     if smart:
         try:
-            frame_img = _render_frame(anim, ANALYZE_SIZE)
-            cx_n, cy_n, bw_n, bh_n, mean = _smart_anchor(frame_img)
+            integrals = _build_integrals(_render_frame(anim, ANALYZE_SIZE))
         except Exception:
-            logger.exception("smart anchor failed, falling back to manual placement")
-            cx_n, cy_n, bw_n, bh_n, mean = (0.5, y_offset / canvas_h, max_width_ratio, 0.15, 0.0)
-        anchor_cx = cx_n * canvas_w
-        anchor_cy = cy_n * canvas_h
-        max_text_w = bw_n * canvas_w * 0.92
-        max_text_h = bh_n * canvas_h * 0.85
-        if auto_color and mean > 0.55:
-            fill_hex, stroke_hex = stroke_hex, fill_hex  # invert
-    else:
-        anchor_cx = canvas_w / 2
-        anchor_cy = float(y_offset)
-        max_text_w = canvas_w * max_width_ratio
-        max_text_h = canvas_h  # not constrained vertically in legacy mode
-        mean = 0.0
+            logger.exception("smart anchor: failed to render analysis frame")
+            integrals = None
 
-    # Iteratively shrink font until text fits both width and height limits.
-    size = max(12, int(initial_size))
-    group = None
-    bbox = None
-    for _ in range(20):
-        fs = FontStyle(font, size)
-        group = fs.render(text)
-        bbox = group.bounding_box()
-        tw = bbox.x2 - bbox.x1
-        th = bbox.y2 - bbox.y1
-        if (tw <= max_text_w and th <= max_text_h) or size <= 12:
-            break
-        ratio_w = max_text_w / tw if tw > 0 else 1.0
-        ratio_h = max_text_h / th if th > 0 else 1.0
-        size = max(12, int(size * min(ratio_w, ratio_h) * 0.95))
+    chosen = None  # (size, group, bbox, anchor_cx, anchor_cy, mean, mode)
+
+    if smart and integrals is not None:
+        for size in sizes:
+            if size < _SMART_MIN_SIZE:
+                # Below this size the caption looks too small to be considered
+                # a "feature" placement — let the meme-caption fallback take over.
+                break
+            fs = FontStyle(font, size)
+            group = fs.render(text)
+            bbox = group.bounding_box()
+            tw = bbox.x2 - bbox.x1
+            th = bbox.y2 - bbox.y1
+            res = _best_position_for(integrals, tw, th, canvas=canvas_w)
+            if res is not None and res[0] >= _SMART_MIN_SCORE:
+                _, cx, cy, mean = res
+                chosen = (size, group, bbox, cx, cy, float(mean), "smart")
+                break
+
+    if chosen is None:
+        # Meme caption fallback: centred, near canvas bottom.
+        anchor_cx = canvas_w / 2
+        target_w = canvas_w * (0.88 if smart else float(max_width_ratio))
+        # Allow finer-grained smaller sizes for the fallback so very long
+        # captions still fit horizontally.
+        fallback_sizes = list(sizes) + [s for s in (32, 24, 18, 14, 12) if s < sizes[-1]]
+        for size in fallback_sizes:
+            fs = FontStyle(font, size)
+            group = fs.render(text)
+            bbox = group.bounding_box()
+            tw = bbox.x2 - bbox.x1
+            th = bbox.y2 - bbox.y1
+            if tw <= target_w and th <= canvas_h * 0.32:
+                cy_text = canvas_h - th / 2 - 22 if smart else float(y_offset)
+                chosen = (size, group, bbox, anchor_cx, cy_text, 0.0, "fallback")
+                break
+        if chosen is None:
+            # Even at 12pt the text overflows. Use 12pt anyway (it'll wrap-clip).
+            size = 12
+            fs = FontStyle(font, size)
+            group = fs.render(text)
+            bbox = group.bounding_box()
+            cy_text = (canvas_h - 30) if smart else float(y_offset)
+            chosen = (size, group, bbox, anchor_cx, cy_text, 0.0, "fallback")
+
+    size, group, bbox, anchor_cx, anchor_cy, mean, mode = chosen
+
+    if smart and auto_color and mode == "smart" and mean > 0.55:
+        fill_hex, stroke_hex = stroke_hex, fill_hex
 
     # Centre the text on the anchor
     cx = (bbox.x1 + bbox.x2) / 2
@@ -229,7 +272,7 @@ def _render_caption(
     layer = ShapeLayer()
     layer.name = "nftgift_caption"
     layer.shapes.append(group)
-    stroke_w = max(2, size // 12)
+    stroke_w = max(3, size // 10)
     sr, sg, sb = _hex_to_rgb(stroke_hex)
     layer.shapes.append(Stroke(Color(sr, sg, sb), stroke_w))
     fr, fg, fb = _hex_to_rgb(fill_hex)
