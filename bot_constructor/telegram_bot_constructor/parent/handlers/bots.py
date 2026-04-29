@@ -379,13 +379,40 @@ async def msg_code_by_token(message: Message, state: FSMContext, bot: Bot) -> No
         constructor_username = None
         constructor_title = None
 
-    archive = build_starter_zip(
-        token=token,
-        bot_username=me.username,
-        bot_title=me.full_name,
-        constructor_username=constructor_username,
-        constructor_title=constructor_title,
-    )
+    # Если этот бот уже добавлен в конструктор и принадлежит пользователю —
+    # отдаём именно ту конфигурацию, что собрана в конструкторе.
+    async with session_scope() as session:
+        existing = await get_bot_by_token(session, token)
+        existing_belongs = (
+            existing is not None
+            and existing.owner is not None
+            and existing.owner.tg_id == message.from_user.id
+        )
+        if existing is not None and not existing_belongs:
+            await state.clear()
+            await message.answer(
+                f"{E_CROSS} Этот бот добавлен в конструктор другим пользователем.",
+                reply_markup=main_menu_kb(),
+            )
+            return
+        if existing_belongs:
+            archive = await build_export_zip(
+                session,
+                existing.id,
+                constructor_username=constructor_username,
+                constructor_title=constructor_title,
+                prefill_token=token,
+            )
+            source_label = "из вашего конструктора (со всеми командами, триггерами и клавиатурами)"
+        else:
+            archive = build_starter_zip(
+                token=token,
+                bot_username=me.username,
+                bot_title=me.full_name,
+                constructor_username=constructor_username,
+                constructor_title=constructor_title,
+            )
+            source_label = "стартовый шаблон (бот не добавлен в конструктор)"
 
     title = me.full_name or me.username or "bot"
     safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in title).strip("_") or "bot"
@@ -397,6 +424,7 @@ async def msg_code_by_token(message: Message, state: FSMContext, bot: Bot) -> No
         caption=(
             f"<b>{E_DOWNLOAD} Код по токену</b>\n\n"
             f"Бот: <b>@{me.username}</b>\n"
+            f"Содержимое: {source_label}\n\n"
             f"Запуск: распакуйте архив и выполните\n"
             f"<code>pip install -r requirements.txt</code>\n"
             f"<code>python bot.py</code>\n\n"

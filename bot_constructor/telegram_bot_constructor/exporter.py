@@ -431,8 +431,13 @@ async def build_export_zip(
     *,
     constructor_username: str | None,
     constructor_title: str | None,
+    prefill_token: str | None = None,
 ) -> bytes:
-    """Собирает zip с standalone-кодом для дочернего бота."""
+    """Собирает zip с standalone-кодом для дочернего бота.
+
+    Если передан ``prefill_token`` — внутри архива создаётся ``.env`` с
+    уже вписанным ``BOT_TOKEN``, чтобы код был сразу запускаемым.
+    """
     config = await _serialize_bot(session, bot_id)
     title = config["title"] or config["username"] or f"bot_{bot_id}"
 
@@ -457,16 +462,22 @@ async def build_export_zip(
         CONSTRUCTOR_NAME_LINK=link,
     )
 
+    folder = _safe_name(title)
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(f"{_safe_name(title)}/bot.py", bot_py)
+        zf.writestr(f"{folder}/bot.py", bot_py)
         zf.writestr(
-            f"{_safe_name(title)}/config.json",
+            f"{folder}/config.json",
             json.dumps(config, ensure_ascii=False, indent=2),
         )
-        zf.writestr(f"{_safe_name(title)}/requirements.txt", REQUIREMENTS_TXT)
-        zf.writestr(f"{_safe_name(title)}/.env.example", ENV_EXAMPLE)
-        zf.writestr(f"{_safe_name(title)}/README.md", readme)
+        zf.writestr(f"{folder}/requirements.txt", REQUIREMENTS_TXT)
+        if prefill_token:
+            zf.writestr(
+                f"{folder}/.env",
+                "# Токен бота от @BotFather\nBOT_TOKEN=" + prefill_token + "\n",
+            )
+        zf.writestr(f"{folder}/.env.example", ENV_EXAMPLE)
+        zf.writestr(f"{folder}/README.md", readme)
     return buf.getvalue()
 
 
