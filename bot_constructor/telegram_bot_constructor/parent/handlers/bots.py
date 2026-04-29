@@ -8,7 +8,7 @@ from aiogram import Bot, F, Router
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from telegram_bot_constructor.config import Settings
 from telegram_bot_constructor.db.repo import (
@@ -26,10 +26,12 @@ from telegram_bot_constructor.emoji import (
     E_BOT,
     E_CHECK,
     E_CROSS,
+    E_DOWNLOAD,
     E_INFO,
     E_PARTY,
     E_TRASH,
 )
+from telegram_bot_constructor.exporter import build_export_zip
 from telegram_bot_constructor.parent.menu import (
     back_to_menu_kb,
     bot_card_kb,
@@ -262,3 +264,54 @@ async def cb_delete(call: CallbackQuery) -> None:
         reply_markup=back_to_menu_kb(),
     )
     await call.answer("Удалено")
+
+
+@router.callback_query(F.data.regexp(r"^bot:\d+:export$"))
+async def cb_export(call: CallbackQuery, bot: Bot) -> None:
+    """Собрать и отправить владельцу zip с standalone-кодом дочернего бота."""
+    if call.message is None or call.data is None or call.from_user is None:
+        await call.answer()
+        return
+    bot_id = int(call.data.split(":")[1])
+    async with session_scope() as session:
+        target = await get_bot_by_id(session, bot_id)
+        if target is None:
+            await call.answer("Бот не найден", show_alert=True)
+            return
+        if target.owner.tg_id != call.from_user.id:
+            await call.answer("Это не ваш бот", show_alert=True)
+            return
+
+        try:
+            me = await bot.get_me()
+            constructor_username = me.username
+            constructor_title = me.full_name
+        except Exception as exc:  # pragma: no cover - сетевая ошибка
+            logger.warning("get_me for constructor failed: %s", exc)
+            constructor_username = None
+            constructor_title = None
+
+        archive = await build_export_zip(
+            session,
+            bot_id,
+            constructor_username=constructor_username,
+            constructor_title=constructor_title,
+        )
+
+    title = target.title or target.username or f"bot_{bot_id}"
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in title).strip("_") or "bot"
+    filename = f"{safe[:48]}.zip"
+
+    await call.answer("Готовлю архив…")
+    await bot.send_document(
+        chat_id=call.from_user.id,
+        document=BufferedInputFile(archive, filename=filename),
+        caption=(
+            f"<b>{E_DOWNLOAD} Код вашего бота</b>\n\n"
+            f"Запуск: распакуйте архив, поставьте зависимости из <code>requirements.txt</code>, "
+            f"положите <code>BOT_TOKEN</code> в <code>.env</code> и запустите <code>python bot.py</code>.\n\n"
+            f"{E_INFO} В <code>/start</code> выгруженного бота добавлен футер "
+            f"«Создано с помощью {('@' + constructor_username) if constructor_username else 'конструктора'}»."
+        ),
+        parse_mode=ParseMode.HTML,
+    )

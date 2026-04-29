@@ -9,6 +9,7 @@ from telegram_bot_constructor.emoji import (
     E_BOT,
     E_CHECK,
     E_CROSS,
+    E_DOWNLOAD,
     E_INFO,
     E_LOCK_CLOSED,
     E_LOCK_OPEN,
@@ -93,6 +94,11 @@ def bot_card_kb(bot: ChildBot) -> InlineKeyboardMarkup:
         [
             inline_button(
                 "Пользователи", callback_data=f"bot:{bot.id}:users", icon=E_PEOPLE
+            ),
+        ],
+        [
+            inline_button(
+                "Выгрузить код", callback_data=f"bot:{bot.id}:export", icon=E_DOWNLOAD
             ),
         ],
         [
