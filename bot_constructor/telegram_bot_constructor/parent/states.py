@@ -9,6 +9,10 @@ class AddBot(StatesGroup):
     waiting_token = State()
 
 
+class CodeFromToken(StatesGroup):
+    waiting_token = State()
+
+
 class EditStartMessage(StatesGroup):
     waiting_text = State()
 

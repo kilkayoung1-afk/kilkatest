@@ -31,14 +31,14 @@ from telegram_bot_constructor.emoji import (
     E_PARTY,
     E_TRASH,
 )
-from telegram_bot_constructor.exporter import build_export_zip
+from telegram_bot_constructor.exporter import build_export_zip, build_starter_zip
 from telegram_bot_constructor.parent.menu import (
     back_to_menu_kb,
     bot_card_kb,
     main_menu_kb,
     my_bots_kb,
 )
-from telegram_bot_constructor.parent.states import AddBot
+from telegram_bot_constructor.parent.states import AddBot, CodeFromToken
 
 logger = logging.getLogger(__name__)
 router = Router(name="parent.bots")
@@ -314,4 +314,96 @@ async def cb_export(call: CallbackQuery, bot: Bot) -> None:
             f"«Создано с помощью {('@' + constructor_username) if constructor_username else 'конструктора'}»."
         ),
         parse_mode=ParseMode.HTML,
+    )
+
+
+# ---------------------------------------------------------------------------
+# «Получить код по токену»: пользователь присылает токен → бот валидирует
+# через ``getMe`` и присылает готовый standalone-zip без сохранения в БД.
+# ---------------------------------------------------------------------------
+
+
+@router.callback_query(F.data == "code_by_token")
+async def cb_code_by_token(call: CallbackQuery, state: FSMContext) -> None:
+    if call.from_user is None or call.message is None:
+        await call.answer()
+        return
+    await state.set_state(CodeFromToken.waiting_token)
+    await call.message.edit_text(
+        f"<b>{E_DOWNLOAD} Получить код по токену</b>\n\n"
+        "Пришлите токен от @BotFather одним сообщением — "
+        "верну ZIP с готовым стартовым кодом бота.\n"
+        f"Формат: <code>1234567890:AAA...</code>\n\n"
+        f"{E_INFO} Токен <b>не сохраняется</b> в конструкторе, "
+        "будет вписан только в архив (.env).",
+        parse_mode=ParseMode.HTML,
+        reply_markup=back_to_menu_kb(),
+    )
+    await call.answer()
+
+
+@router.message(CodeFromToken.waiting_token, F.text)
+async def msg_code_by_token(message: Message, state: FSMContext, bot: Bot) -> None:
+    if message.from_user is None or message.text is None:
+        return
+    token = message.text.strip()
+    if ":" not in token or len(token) < 30:
+        await message.answer(
+            f"{E_CROSS} Похоже, это не токен. Пришлите валидный токен от @BotFather."
+        )
+        return
+
+    probe = Bot(token=token)
+    try:
+        me = await probe.get_me()
+    except TelegramUnauthorizedError:
+        await message.answer(f"{E_CROSS} Telegram вернул Unauthorized — токен неверный или отозван.")
+        await probe.session.close()
+        return
+    except Exception as exc:
+        logger.warning("get_me failed: %s", exc)
+        await message.answer(f"{E_CROSS} Не удалось проверить токен: {exc}")
+        await probe.session.close()
+        return
+    finally:
+        try:
+            await probe.session.close()
+        except Exception:
+            pass
+
+    try:
+        constructor_me = await bot.get_me()
+        constructor_username = constructor_me.username
+        constructor_title = constructor_me.full_name
+    except Exception:
+        constructor_username = None
+        constructor_title = None
+
+    archive = build_starter_zip(
+        token=token,
+        bot_username=me.username,
+        bot_title=me.full_name,
+        constructor_username=constructor_username,
+        constructor_title=constructor_title,
+    )
+
+    title = me.full_name or me.username or "bot"
+    safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in title).strip("_") or "bot"
+    filename = f"{safe[:48]}.zip"
+
+    await state.clear()
+    await message.answer_document(
+        document=BufferedInputFile(archive, filename=filename),
+        caption=(
+            f"<b>{E_DOWNLOAD} Код по токену</b>\n\n"
+            f"Бот: <b>@{me.username}</b>\n"
+            f"Запуск: распакуйте архив и выполните\n"
+            f"<code>pip install -r requirements.txt</code>\n"
+            f"<code>python bot.py</code>\n\n"
+            f"{E_INFO} <code>BOT_TOKEN</code> уже вписан в <code>.env</code> внутри архива.\n"
+            f"{E_INFO} В <code>/start</code> добавлен футер "
+            f"«Создано с помощью {('@' + constructor_username) if constructor_username else 'конструктора'}»."
+        ),
+        parse_mode=ParseMode.HTML,
+        reply_markup=main_menu_kb(),
     )

@@ -8,6 +8,7 @@ from telegram_bot_constructor.db.models import ChildBot
 from telegram_bot_constructor.emoji import (
     E_BOT,
     E_CHECK,
+    E_CODE,
     E_CROSS,
     E_DOWNLOAD,
     E_INFO,
@@ -28,6 +29,7 @@ def main_menu_kb() -> InlineKeyboardMarkup:
     return inline_kb([
         [inline_button("Мои боты", callback_data="my_bots", icon=E_BOT)],
         [inline_button("Добавить бота", callback_data="add_bot", icon=E_SETTINGS)],
+        [inline_button("Получить код по токену", callback_data="code_by_token", icon=E_CODE)],
         [inline_button("Помощь", callback_data="help", icon=E_INFO)],
     ])
 

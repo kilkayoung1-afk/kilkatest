@@ -475,3 +475,85 @@ def _safe_name(name: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name)
     safe = safe.strip("_") or "bot"
     return safe[:48]
+
+
+def _default_config(*, title: str | None, username: str | None) -> dict:
+    """Минимальный config.json для шаблонного бота без правок."""
+    return {
+        "schema_version": 1,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "title": title,
+        "username": username,
+        "start_text": (
+            "<b>Привет!</b>\n\n"
+            "Это твой бот, собранный из шаблона. "
+            "Меняй ответы и команды в <code>config.json</code>, "
+            "логику — в <code>bot.py</code>."
+        ),
+        "subscribe_channel": None,
+        "subscribe_link": None,
+        "antispam_per_minute": 0,
+        "commands": [
+            {
+                "command": "help",
+                "description": "Справка",
+                "response_text": (
+                    "<b>Справка</b>\n\n"
+                    "Этот бот использует premium-эмодзи через "
+                    "<code>icon_custom_emoji_id</code> и "
+                    "<code>&lt;tg-emoji&gt;</code>."
+                ),
+                "keyboard_id": None,
+            },
+        ],
+        "triggers": [],
+        "keyboards": [],
+    }
+
+
+def build_starter_zip(
+    *,
+    token: str,
+    bot_username: str | None,
+    bot_title: str | None,
+    constructor_username: str | None,
+    constructor_title: str | None,
+) -> bytes:
+    """Собирает standalone-zip по одному только токену (без участия БД).
+
+    Используется в пункте меню «Получить код по токену»: пользователь
+    присылает токен, конструктор валидирует его через ``getMe`` и отдаёт
+    готовый архив с предзаполненным ``BOT_TOKEN`` в ``.env``.
+    """
+    if constructor_username:
+        link = f"@{constructor_username}"
+    elif constructor_title:
+        link = constructor_title
+    else:
+        link = "конструктора ботов"
+
+    bot_premium = '<tg-emoji emoji-id="6030400221232501136">🤖</tg-emoji>'
+    footer = f'<i>{bot_premium} Создано с помощью {link}</i>' if link else ""
+
+    bot_py = BOT_PY_TEMPLATE.substitute(
+        CONSTRUCTOR_LINK=link,
+        CONSTRUCTOR_FOOTER_REPR=_python_repr(footer),
+    )
+    title = bot_title or bot_username or "bot"
+    readme = README_TEMPLATE.substitute(TITLE=title, CONSTRUCTOR_NAME_LINK=link)
+    config = _default_config(title=bot_title, username=bot_username)
+    env_filled = "# Токен бота от @BotFather\nBOT_TOKEN=" + token + "\n"
+
+    folder = _safe_name(title)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{folder}/bot.py", bot_py)
+        zf.writestr(
+            f"{folder}/config.json",
+            json.dumps(config, ensure_ascii=False, indent=2),
+        )
+        zf.writestr(f"{folder}/requirements.txt", REQUIREMENTS_TXT)
+        zf.writestr(f"{folder}/.env", env_filled)
+        zf.writestr(f"{folder}/.env.example", ENV_EXAMPLE)
+        zf.writestr(f"{folder}/README.md", readme)
+    return buf.getvalue()
