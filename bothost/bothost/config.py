@@ -28,6 +28,7 @@ class Config:
     user_bot_image: str
     user_bot_memory: str
     user_bot_cpus: str
+    user_bot_network: str = "bridge"
     log_level: str = "INFO"
     max_bots_per_user: int = 50
     bot_name_max_length: int = 32
@@ -51,6 +52,7 @@ class Config:
         user_bot_image = os.environ.get("USER_BOT_IMAGE", "bothost-userbot:latest")
         user_bot_memory = os.environ.get("USER_BOT_MEMORY", "256m")
         user_bot_cpus = os.environ.get("USER_BOT_CPUS", "0.5")
+        user_bot_network = os.environ.get("USER_BOT_NETWORK", "bridge")
         log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
         max_bots = int(os.environ.get("MAX_BOTS_PER_USER", "50"))
         return cls(
@@ -63,6 +65,7 @@ class Config:
             user_bot_image=user_bot_image,
             user_bot_memory=user_bot_memory,
             user_bot_cpus=user_bot_cpus,
+            user_bot_network=user_bot_network,
             log_level=log_level,
             max_bots_per_user=max_bots,
         )

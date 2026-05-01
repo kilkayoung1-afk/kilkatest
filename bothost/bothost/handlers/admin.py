@@ -10,6 +10,7 @@ from aiogram.types import Message
 
 from bothost.config import Config
 from bothost.db import Database
+from bothost.plans import find_plan
 from bothost.runner import BotRunner
 
 router = Router(name="admin")
@@ -82,6 +83,85 @@ async def cmd_extend(message: Message, command: CommandObject, cfg: Config, db: 
     )
     await message.answer(
         f"✅ Подписка <code>{target}</code> продлена на {days} дн.\n"
+        f"Сейчас: до {sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}, квота {sub.bot_quota}."
+    )
+
+
+@router.message(Command("grant"))
+async def cmd_grant(
+    message: Message,
+    command: CommandObject,
+    cfg: Config,
+    db: Database,
+) -> None:
+    """Grant any plan or arbitrary days/quota to any user (admin-only).
+
+    Usage:
+      /grant <tg_id> <plan_id>          — issue plan from config
+      /grant <tg_id> <days>             — extend by N days, quota unchanged (or 1)
+      /grant <tg_id> <days> <bot_quota> — extend by N days, set quota
+    """
+    if not _is_admin(message, cfg):
+        return
+    args = (command.args or "").split()
+    if len(args) < 2:
+        await message.answer(
+            "Использование:\n"
+            "<code>/grant &lt;tg_id&gt; &lt;plan_id&gt;</code> — тариф из конфига\n"
+            "<code>/grant &lt;tg_id&gt; &lt;дни&gt; [квота]</code> — произвольно"
+        )
+        return
+    try:
+        target = int(args[0])
+    except ValueError:
+        await message.answer("Неверный tg_id.")
+        return
+
+    second = args[1]
+    plan = find_plan(cfg.plans, second)
+    if plan is not None:
+        days = plan.days
+        bots = plan.bots
+        plan_id = f"admin-grant-{plan.id}"
+        label = f"{plan.name} ({plan.bots} бот{'' if plan.bots == 1 else 'а' if 2 <= plan.bots <= 4 else 'ов'} на {plan.days} дн)"
+    else:
+        try:
+            days = int(second)
+        except ValueError:
+            await message.answer(
+                f"Не понял второй аргумент. Тарифы: "
+                f"{', '.join(p.id for p in cfg.plans)}, или число дней."
+            )
+            return
+        if days <= 0:
+            await message.answer("Дней должно быть > 0.")
+            return
+        if len(args) >= 3:
+            try:
+                bots = int(args[2])
+            except ValueError:
+                await message.answer("Квота должна быть числом.")
+                return
+            if bots < 1:
+                await message.answer("Квота должна быть >= 1.")
+                return
+        else:
+            existing = await db.get_subscription(target)
+            bots = existing.bot_quota if existing else 1
+        plan_id = "admin-grant-custom"
+        label = f"{days} дн, квота {bots}"
+
+    await db.upsert_user(target, None)
+    sub = await db.apply_payment(
+        tg_id=target,
+        plan_id=plan_id,
+        paid_stars=0,
+        days=days,
+        bots=bots,
+        payment_charge_id=None,
+    )
+    await message.answer(
+        f"✅ Выдано <code>{target}</code>: {label}\n"
         f"Сейчас: до {sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}, квота {sub.bot_quota}."
     )
 

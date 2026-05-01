@@ -216,7 +216,9 @@ async def cb_bot_action(
         await state.set_state(state=None)
         await state.update_data(replace_bot_id=record.id)
         await call.message.answer(
-            f"🔁 Пришли новый <code>.py</code> для <b>{record.name}</b> — заменю код и перезапущу.",
+            f"🔁 Пришли новый <code>.py</code> или <code>.zip</code> для <b>{record.name}</b> — "
+            "заменю код, переустановлю зависимости (если есть <code>requirements.txt</code>) "
+            "и перезапущу.",
             reply_markup=cancel_keyboard(),
         )
         await call.answer()
