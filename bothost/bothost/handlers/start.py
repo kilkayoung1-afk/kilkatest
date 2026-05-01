@@ -45,7 +45,64 @@ HELP = (
     f"telethon, requests, aiohttp, httpx, sqlalchemy, asyncpg, redis, pymongo/motor, "
     f"pydantic, openai, anthropic, fastapi, pillow, lxml/bs4, и ещё ~50 популярных.\n"
     f"{e.PENCIL} <b>Имя бота:</b> <code>[A-Za-z0-9_-]</code>, до 32 символов.\n\n"
-    f"{e.CROSS} Размещай только свой код. За поведение бота отвечает его автор."
+    f"{e.CROSS} Размещай только свой код. За поведение бота отвечает его автор. "
+    f"Подробности — <code>/terms</code> и <code>/privacy</code>."
+)
+
+
+TERMS = (
+    f"{e.LOCK_CLOSED} <b>Условия использования</b>\n\n"
+    f"{e.BOT} <b>Сервис.</b> Я — bothost, технический оператор. Я предоставляю инфраструктуру "
+    f"(изолированный Docker-контейнер) для запуска <i>твоего</i> Telegram-бота на Python. "
+    f"Я не являюсь автором ботов, размещённых пользователями, и не несу ответственности "
+    f"за их содержание и поведение.\n\n"
+    f"{e.PAPERCLIP} <b>Что разрешено.</b> Запускать только <i>собственный</i> код Python, "
+    f"не нарушающий законы РФ и ToS Telegram (<code>https://telegram.org/tos</code>). "
+    f"Допустимы любые легальные боты: каналы, услуги, мини-игры, утилиты.\n\n"
+    f"{e.CROSS} <b>Что запрещено.</b>\n"
+    f"  • Спам, фишинг, скам, дидосы, ботнеты.\n"
+    f"  • Кража данных (стиллеры): чтение чужих ключей/кошельков/токенов.\n"
+    f"  • CSAM и контент 18+ без подтверждения возраста.\n"
+    f"  • Майнинг криптовалют, отмыв звёзд.\n"
+    f"  • Любые нарушения Telegram ToS и российского законодательства.\n"
+    f"  Нарушения = немедленная блокировка без возврата средств. Стиллеры режутся ещё на этапе загрузки кода.\n\n"
+    f"{e.COIN} <b>Оплата и сроки.</b> Подписка покупается за Telegram Stars (<code>XTR</code>). "
+    f"Срок — 14 дней с момента оплаты, продлевается покупкой нового тарифа. "
+    f"После истечения срока боты автоматически останавливаются. Файлы сохраняются ещё 7 дней — "
+    f"можно продлить и продолжить с того же места.\n\n"
+    f"{e.CALENDAR} <b>Возврат средств.</b> Telegram Stars не подлежат возврату по правилам Telegram, "
+    f"кроме случая, когда сервис не предоставил оплаченную услугу по моей вине "
+    f"(например, бот не смог запуститься из-за моей ошибки в течение 24 часов после оплаты, "
+    f"и проблема не решилась). В таком случае напиши админу — оформим возврат через Telegram refund API.\n\n"
+    f"{e.LOCK_OPEN} <b>Ограничение ответственности.</b> Сервис предоставляется «как есть». "
+    f"Я не гарантирую 100%-ный аптайм и не несу ответственности за упущенную выгоду, "
+    f"потерю данных в /app/data при сбоях, или за действия твоего бота по отношению к третьим лицам.\n\n"
+    f"{e.MEGAPHONE} <b>Изменения.</b> Условия могут меняться. О существенных изменениях я уведомлю в боте за 7 дней.\n\n"
+    f"{e.PERSON_OK} <b>Контакт.</b> Админ: <code>tg://user?id=7119847306</code>. "
+    f"Конфиденциальность — <code>/privacy</code>."
+)
+
+
+PRIVACY = (
+    f"{e.EYE} <b>Политика конфиденциальности</b>\n\n"
+    f"{e.PROFILE} <b>Что я храню.</b>\n"
+    f"  • Твой Telegram <b>ID</b> и <b>username</b> (для авторизации и связи).\n"
+    f"  • <b>Подписку</b>: тариф, срок, лимит ботов, сумма звёзд, ID платежа.\n"
+    f"  • <b>Метаданные ботов</b>: имя, статус, ID контейнера, время запуска.\n"
+    f"  • <b>Код бота</b>, который ты загрузил, и его файлы из <code>/app/data</code> — на диске сервера.\n"
+    f"  • <b>Логи</b> работы бота за последние 1000 строк (для команды «Логи»).\n\n"
+    f"{e.LOCK_CLOSED} <b>Что я НЕ собираю.</b>\n"
+    f"  • Содержимое чатов твоего бота с его пользователями — оно не проходит через bothost.\n"
+    f"  • Данные банковских карт — оплата идёт через Telegram Stars, я вижу только сумму и ID транзакции.\n\n"
+    f"{e.PEOPLE} <b>Кому я передаю данные.</b> Никому. Сторонним сервисам — нет. "
+    f"Исключения: по обязательному запросу госорганов РФ; платёжные ID — Telegram (для возвратов).\n\n"
+    f"{e.TRASH} <b>Удаление.</b> Команда <code>/delete_account</code> или сообщение админу — "
+    f"и в течение 7 дней я уберу твой аккаунт, все боты, файлы и историю покупок. Бэкапы стираются ежемесячно.\n\n"
+    f"{e.LOCK_OPEN} <b>Безопасность.</b> Данные хранятся на сервере оператора в SQLite. "
+    f"Доступ к серверу есть только у админа. Каждый пользовательский бот изолирован Docker-контейнером "
+    f"(uid 65534, cap-drop ALL, read-only fs, ulimits) — другие боты не могут читать твои файлы.\n\n"
+    f"{e.PERSON_OK} <b>Права субъекта данных (152-ФЗ).</b> Можешь запросить копию своих данных, "
+    f"исправить их или потребовать удаления — пиши админу <code>tg://user?id=7119847306</code>."
 )
 
 
@@ -74,6 +131,16 @@ async def handle_help(message: Message) -> None:
     await message.answer(HELP)
 
 
+@router.message(Command("terms"))
+async def handle_terms(message: Message) -> None:
+    await message.answer(TERMS, disable_web_page_preview=True)
+
+
+@router.message(Command("privacy"))
+async def handle_privacy(message: Message) -> None:
+    await message.answer(PRIVACY, disable_web_page_preview=True)
+
+
 @router.message(Command("status"))
 async def handle_status(message: Message, cfg: Config, db: Database) -> None:
     if message.from_user is None:
@@ -85,6 +152,14 @@ async def handle_status(message: Message, cfg: Config, db: Database) -> None:
 async def cb_help(call: CallbackQuery) -> None:
     if isinstance(call.message, Message):
         await call.message.answer(HELP)
+    await call.answer()
+
+
+@router.callback_query(F.data == "terms")
+async def cb_terms(call: CallbackQuery) -> None:
+    if isinstance(call.message, Message):
+        await call.message.answer(TERMS, disable_web_page_preview=True)
+        await call.message.answer(PRIVACY, disable_web_page_preview=True)
     await call.answer()
 
 
