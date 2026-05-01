@@ -4,16 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import shutil
 from pathlib import Path
 
 import docker
 from docker.errors import APIError, NotFound
-from docker.models.containers import Container
 
-from .config import Config
+from bothost.config import Config
 
 logger = logging.getLogger(__name__)
+
+
+_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,32}$")
+
+
+def slug_name(name: str) -> str | None:
+    """Return the bot name if it matches the allowed pattern, else None."""
+    if not name:
+        return None
+    cleaned = name.strip()
+    if not _NAME_PATTERN.match(cleaned):
+        return None
+    return cleaned
+
+
+def make_container_name(tg_id: int, bot_id: int) -> str:
+    return f"bothost_user_{tg_id}_{bot_id}"
 
 
 class BotRunner:
@@ -23,21 +40,18 @@ class BotRunner:
         self._config = config
         self._client = docker.from_env()
 
-    # --- helpers ---
+    def _user_dir(self, tg_id: int, bot_id: int) -> Path:
+        return self._config.user_bots_dir / str(tg_id) / str(bot_id)
 
-    def _container_name(self, tg_id: int) -> str:
-        return f"bothost_user_{tg_id}"
-
-    def _user_dir(self, tg_id: int) -> Path:
-        return self._config.user_bots_dir / str(tg_id)
+    def _user_dir_host(self, tg_id: int, bot_id: int) -> Path:
+        """Path as visible to the host docker daemon (which spawns child containers)."""
+        return self._config.user_bots_dir_host / str(tg_id) / str(bot_id)
 
     # --- public API ---
 
-    async def save_script(self, tg_id: int, source: bytes) -> Path:
-        """Persist the .py file to the per-user directory."""
-
+    async def save_script(self, *, tg_id: int, bot_id: int, source: bytes) -> Path:
         def _write() -> Path:
-            user_dir = self._user_dir(tg_id)
+            user_dir = self._user_dir(tg_id, bot_id)
             user_dir.mkdir(parents=True, exist_ok=True)
             target = user_dir / "bot.py"
             target.write_bytes(source)
@@ -45,52 +59,40 @@ class BotRunner:
 
         return await asyncio.to_thread(_write)
 
-    async def start(self, tg_id: int) -> str:
-        """Start the user's bot. Returns the new container id."""
+    async def start(self, *, tg_id: int, bot_id: int, container_name: str) -> str:
+        await self._stop_blocking_async(container_name, remove=True)
+        return await asyncio.to_thread(
+            self._start_blocking, tg_id=tg_id, bot_id=bot_id, container_name=container_name
+        )
 
-        await self.stop(tg_id, remove=True)
-        return await asyncio.to_thread(self._start_blocking, tg_id)
+    async def stop(self, container_name: str, *, remove: bool = True) -> bool:
+        return await asyncio.to_thread(self._stop_blocking, container_name, remove)
 
-    async def stop(self, tg_id: int, *, remove: bool = True) -> bool:
-        """Stop and (optionally) remove the user's container. Returns True if it existed."""
+    async def is_running(self, container_name: str) -> bool:
+        return await asyncio.to_thread(self._is_running_blocking, container_name)
 
-        return await asyncio.to_thread(self._stop_blocking, tg_id, remove)
+    async def logs(self, container_name: str, tail: int = 50) -> str:
+        return await asyncio.to_thread(self._logs_blocking, container_name, tail)
 
-    async def is_running(self, tg_id: int) -> bool:
-        return await asyncio.to_thread(self._is_running_blocking, tg_id)
-
-    async def logs(self, tg_id: int, tail: int = 50) -> str:
-        return await asyncio.to_thread(self._logs_blocking, tg_id, tail)
-
-    async def cleanup_files(self, tg_id: int) -> None:
+    async def cleanup_files(self, *, tg_id: int, bot_id: int) -> None:
         def _rm() -> None:
-            user_dir = self._user_dir(tg_id)
+            user_dir = self._user_dir(tg_id, bot_id)
             if user_dir.exists():
                 shutil.rmtree(user_dir, ignore_errors=True)
 
         await asyncio.to_thread(_rm)
 
-    # --- blocking helpers run via asyncio.to_thread ---
+    async def _stop_blocking_async(self, container_name: str, *, remove: bool) -> bool:
+        return await asyncio.to_thread(self._stop_blocking, container_name, remove)
 
-    def _start_blocking(self, tg_id: int) -> str:
-        user_dir = self._user_dir(tg_id)
-        user_dir.mkdir(parents=True, exist_ok=True)
+    # --- blocking helpers ---
+
+    def _start_blocking(self, *, tg_id: int, bot_id: int, container_name: str) -> str:
+        user_dir = self._user_dir(tg_id, bot_id)
         bot_file = user_dir / "bot.py"
         if not bot_file.exists():
             raise FileNotFoundError(f"User script not found: {bot_file}")
-
-        pip_install = ""
-        if self._config.user_bot_pip_packages:
-            packages = " ".join(f'"{pkg}"' for pkg in self._config.user_bot_pip_packages)
-            pip_install = (
-                f"pip install --no-cache-dir --disable-pip-version-check --quiet {packages} && "
-            )
-
-        command = [
-            "/bin/sh",
-            "-c",
-            f"{pip_install}exec python -u /app/bot.py",
-        ]
+        host_user_dir = self._user_dir_host(tg_id, bot_id)
 
         try:
             cpus = float(self._config.user_bot_cpus)
@@ -99,12 +101,11 @@ class BotRunner:
         nano_cpus = int(cpus * 1e9)
 
         try:
-            container: Container = self._client.containers.run(
+            container = self._client.containers.run(
                 image=self._config.user_bot_image,
-                name=self._container_name(tg_id),
-                command=command,
+                name=container_name,
                 volumes={
-                    str(user_dir.resolve()): {"bind": "/app", "mode": "ro"},
+                    str(host_user_dir): {"bind": "/app", "mode": "ro"},
                 },
                 working_dir="/app",
                 detach=True,
@@ -117,43 +118,46 @@ class BotRunner:
                 read_only=True,
                 network_mode="bridge",
                 restart_policy={"Name": "no"},
-                labels={"managed-by": "bothost", "user-tg-id": str(tg_id)},
+                labels={
+                    "managed-by": "bothost",
+                    "user-tg-id": str(tg_id),
+                    "bot-id": str(bot_id),
+                },
             )
         except APIError:
-            logger.exception("docker run failed for user %s", tg_id)
+            logger.exception("docker run failed for user %s bot %s", tg_id, bot_id)
             raise
 
-        logger.info("started bot for user %s as container %s", tg_id, container.id)
+        logger.info("started bot %s for user %s as container %s", bot_id, tg_id, container.id)
         return container.id or ""
 
-    def _stop_blocking(self, tg_id: int, remove: bool) -> bool:
-        name = self._container_name(tg_id)
+    def _stop_blocking(self, container_name: str, remove: bool) -> bool:
         try:
-            container = self._client.containers.get(name)
+            container = self._client.containers.get(container_name)
         except NotFound:
             return False
         try:
             container.stop(timeout=5)
         except APIError as exc:
-            logger.warning("stopping container %s raised: %s", name, exc)
+            logger.warning("stopping container %s raised: %s", container_name, exc)
         if remove:
             try:
                 container.remove(force=True)
             except APIError as exc:
-                logger.warning("removing container %s raised: %s", name, exc)
+                logger.warning("removing container %s raised: %s", container_name, exc)
         return True
 
-    def _is_running_blocking(self, tg_id: int) -> bool:
+    def _is_running_blocking(self, container_name: str) -> bool:
         try:
-            container = self._client.containers.get(self._container_name(tg_id))
+            container = self._client.containers.get(container_name)
         except NotFound:
             return False
         container.reload()
         return bool(container.status == "running")
 
-    def _logs_blocking(self, tg_id: int, tail: int) -> str:
+    def _logs_blocking(self, container_name: str, tail: int) -> str:
         try:
-            container = self._client.containers.get(self._container_name(tg_id))
+            container = self._client.containers.get(container_name)
         except NotFound:
             return "Контейнер не найден — бот не запущен."
         raw = container.logs(tail=tail, stdout=True, stderr=True)

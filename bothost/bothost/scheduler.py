@@ -8,8 +8,8 @@ from datetime import UTC, datetime
 from aiogram import Bot
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from .db import Database
-from .runner import BotRunner
+from bothost.db import Database
+from bothost.runner import BotRunner
 
 logger = logging.getLogger(__name__)
 
@@ -39,28 +39,29 @@ class ExpirationService:
         running = await self._db.list_running_bots()
         if not running:
             return
+        notified: set[int] = set()
+        now = datetime.now(UTC)
         for record in running:
-            sub = await self._db.active_subscription(record.tg_id)
-            if sub and sub.expires_at > datetime.now(UTC):
+            sub = await self._db.get_subscription(record.tg_id)
+            if sub and sub.expires_at > now:
                 continue
-            logger.info("subscription expired for user %s, stopping bot", record.tg_id)
-            try:
-                await self._runner.stop(record.tg_id, remove=True)
-            except Exception:  # pragma: no cover - container ops are best-effort
-                logger.exception("failed to stop expired bot for user %s", record.tg_id)
-            await self._db.upsert_bot(
-                tg_id=record.tg_id,
-                file_path=record.file_path,
-                status="expired",
-                container_id=None,
+            logger.info(
+                "subscription expired for user %s, stopping bot %s", record.tg_id, record.id
             )
             try:
-                await self._bot.send_message(
-                    chat_id=record.tg_id,
-                    text=(
-                        "⏰ Подписка истекла — твой бот остановлен.\n"
-                        "Продли её командой /buy, чтобы запустить снова."
-                    ),
-                )
-            except Exception:  # pragma: no cover — user might have blocked the bot
-                logger.warning("failed to notify user %s about expiration", record.tg_id)
+                await self._runner.stop(record.container_name, remove=True)
+            except Exception:  # pragma: no cover — best effort
+                logger.exception("failed to stop expired bot %s", record.id)
+            await self._db.update_bot_status(bot_id=record.id, status="expired")
+            if record.tg_id not in notified:
+                notified.add(record.tg_id)
+                try:
+                    await self._bot.send_message(
+                        chat_id=record.tg_id,
+                        text=(
+                            "⏰ Подписка истекла — все ваши боты остановлены.\n"
+                            "Купите подписку через /buy, чтобы запустить их снова."
+                        ),
+                    )
+                except Exception:  # pragma: no cover
+                    logger.warning("failed to notify user %s about expiration", record.tg_id)

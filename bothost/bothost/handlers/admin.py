@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import logging
+from datetime import UTC, datetime, timedelta
 
 from aiogram import Router
 from aiogram.filters import Command, CommandObject
@@ -12,14 +12,11 @@ from bothost.config import Config
 from bothost.db import Database
 from bothost.runner import BotRunner
 
-logger = logging.getLogger(__name__)
 router = Router(name="admin")
 
 
 def _is_admin(message: Message, cfg: Config) -> bool:
-    if message.from_user is None:
-        return False
-    return cfg.is_admin(message.from_user.id)
+    return message.from_user is not None and cfg.is_admin(message.from_user.id)
 
 
 @router.message(Command("stats"))
@@ -27,18 +24,19 @@ async def cmd_stats(message: Message, cfg: Config, db: Database, runner: BotRunn
     if not _is_admin(message, cfg):
         return
     users = await db.count_users()
-    active = await db.list_active_subscriptions()
-    earned = await db.total_paid_stars()
-    running_count = 0
-    for sub in active:
-        if await runner.is_running(sub.tg_id):
-            running_count += 1
+    subs = await db.list_active_subscriptions()
+    running = await db.list_running_bots()
+    actually_running = 0
+    for r in running:
+        if await runner.is_running(r.container_name):
+            actually_running += 1
+    paid = await db.total_paid_stars()
     await message.answer(
-        "📊 <b>Статистика</b>\n"
-        f"👥 Пользователей: {users}\n"
-        f"💳 Активных подписок: {len(active)}\n"
-        f"🤖 Запущенных ботов: {running_count}\n"
-        f"⭐ Всего заработано: {earned}"
+        f"📊 <b>Статистика</b>\n"
+        f"Пользователей: {users}\n"
+        f"Активных подписок: {len(subs)}\n"
+        f"Запущенных ботов: {actually_running}\n"
+        f"Получено звёзд: {paid}⭐"
     )
 
 
@@ -46,18 +44,16 @@ async def cmd_stats(message: Message, cfg: Config, db: Database, runner: BotRunn
 async def cmd_users(message: Message, cfg: Config, db: Database) -> None:
     if not _is_admin(message, cfg):
         return
-    active = await db.list_active_subscriptions()
-    if not active:
-        await message.answer("Нет активных подписок.")
+    subs = await db.list_active_subscriptions()
+    if not subs:
+        await message.answer("Активных подписок нет.")
         return
-    lines = ["📋 <b>Активные подписки</b>"]
-    for sub in active[:50]:
+    lines = ["👥 <b>Активные подписки</b>:"]
+    for s in subs:
         lines.append(
-            f"• <code>{sub.tg_id}</code> до "
-            f"{sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')} ({sub.paid_stars}⭐)"
+            f"• <code>{s.tg_id}</code> — до {s.expires_at.strftime('%Y-%m-%d %H:%M')}, "
+            f"квота {s.bot_quota}, оплачено {s.total_paid_stars}⭐"
         )
-    if len(active) > 50:
-        lines.append(f"…и ещё {len(active) - 50}")
     await message.answer("\n".join(lines))
 
 
@@ -65,24 +61,28 @@ async def cmd_users(message: Message, cfg: Config, db: Database) -> None:
 async def cmd_extend(message: Message, command: CommandObject, cfg: Config, db: Database) -> None:
     if not _is_admin(message, cfg):
         return
-    if not command.args:
-        await message.answer("Использование: /extend &lt;tg_id&gt; &lt;дни&gt;")
-        return
-    parts = command.args.split()
-    if len(parts) != 2:
-        await message.answer("Использование: /extend &lt;tg_id&gt; &lt;дни&gt;")
+    args = (command.args or "").split()
+    if len(args) < 2:
+        await message.answer("Использование: /extend &lt;tg_id&gt; &lt;дни&gt; [квота]")
         return
     try:
-        target_id = int(parts[0])
-        days = int(parts[1])
+        target = int(args[0])
+        days = int(args[1])
+        bots = int(args[2]) if len(args) >= 3 else 1
     except ValueError:
-        await message.answer("tg_id и days должны быть числами.")
+        await message.answer("Неверные аргументы.")
         return
-    await db.upsert_user(target_id, None)
-    sub = await db.extend_subscription(target_id, days)
+    sub = await db.apply_payment(
+        tg_id=target,
+        plan_id="admin-extend",
+        paid_stars=0,
+        days=days,
+        bots=bots,
+        payment_charge_id=None,
+    )
     await message.answer(
-        f"✅ Подписка пользователя <code>{target_id}</code> продлена.\n"
-        f"Активна до <b>{sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}</b>."
+        f"✅ Подписка <code>{target}</code> продлена на {days} дн.\n"
+        f"Сейчас: до {sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}, квота {sub.bot_quota}."
     )
 
 
@@ -96,23 +96,57 @@ async def cmd_admin_stop(
 ) -> None:
     if not _is_admin(message, cfg):
         return
-    if not command.args:
-        await message.answer("Использование: /admin_stop &lt;tg_id&gt;")
+    args = (command.args or "").split()
+    if not args:
+        await message.answer("Использование: /admin_stop &lt;tg_id|all&gt;")
+        return
+    if args[0] == "all":
+        bots = await db.list_running_bots()
+    else:
+        try:
+            tg_id = int(args[0])
+        except ValueError:
+            await message.answer("Неверный tg_id.")
+            return
+        bots = [r for r in await db.list_running_bots() if r.tg_id == tg_id]
+    if not bots:
+        await message.answer("Нет запущенных ботов под эти аргументы.")
+        return
+    for r in bots:
+        await runner.stop(r.container_name, remove=True)
+        await db.update_bot_status(bot_id=r.id, status="stopped")
+    await message.answer(f"⏹ Остановлено: {len(bots)}")
+
+
+@router.message(Command("expire_in"))
+async def cmd_expire_in(
+    message: Message,
+    command: CommandObject,
+    cfg: Config,
+    db: Database,
+) -> None:
+    """Admin: force a user's subscription to expire in N seconds (for testing)."""
+    if not _is_admin(message, cfg):
+        return
+    args = (command.args or "").split()
+    if len(args) < 2:
+        await message.answer("Использование: /expire_in &lt;tg_id&gt; &lt;секунд&gt;")
         return
     try:
-        target_id = int(command.args.strip())
+        target = int(args[0])
+        seconds = int(args[1])
     except ValueError:
-        await message.answer("tg_id должен быть числом.")
+        await message.answer("Неверные аргументы.")
         return
-    existed = await runner.stop(target_id, remove=True)
-    record = await db.get_bot(target_id)
-    if record is not None:
-        await db.upsert_bot(
-            tg_id=target_id,
-            file_path=record.file_path,
-            status="stopped",
-            container_id=None,
+    new_expiry = datetime.now(UTC) + timedelta(seconds=seconds)
+    import aiosqlite
+
+    async with aiosqlite.connect(cfg.db_path) as conn:
+        await conn.execute(
+            "UPDATE subscriptions SET expires_at = ?, updated_at = ? WHERE tg_id = ?",
+            (new_expiry.isoformat(), datetime.now(UTC).isoformat(), target),
         )
+        await conn.commit()
     await message.answer(
-        "🛑 Бот пользователя остановлен." if existed else "У пользователя нет запущенного бота."
+        f"⏳ Подписка {target} истечёт в {new_expiry.strftime('%Y-%m-%d %H:%M:%S UTC')}."
     )

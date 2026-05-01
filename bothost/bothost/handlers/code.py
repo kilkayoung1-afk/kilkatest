@@ -1,25 +1,83 @@
-"""Receive a .py file from the user and start it as a bot."""
+"""Receiving .py uploads, naming the bot, replacing existing code."""
 
 from __future__ import annotations
 
 import logging
+from io import BytesIO
 
 from aiogram import Bot, F, Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bothost.config import Config
-from bothost.db import Database
-from bothost.runner import BotRunner
+from bothost.db import BotRecord, Database
+from bothost.keyboards import bot_actions_menu, cancel_keyboard
+from bothost.runner import BotRunner, make_container_name, slug_name
+from bothost.states import UploadBot
 from bothost.validator import validate_user_script
 
 logger = logging.getLogger(__name__)
 router = Router(name="code")
 
 
+async def _download(message: Message, bot: Bot) -> bytes | None:
+    if message.document is None:
+        return None
+    if (message.document.file_size or 0) > 1024 * 1024:
+        await message.answer("⚠️ Файл больше 1 МБ, пришлите поменьше.")
+        return None
+    if not (message.document.file_name or "").endswith(".py"):
+        await message.answer("⚠️ Нужен файл с расширением <code>.py</code>.")
+        return None
+    buf = BytesIO()
+    await bot.download(message.document, destination=buf)
+    return buf.getvalue()
+
+
+async def _validate_or_warn(message: Message, source: bytes) -> bool:
+    result = validate_user_script(source)
+    if not result.ok:
+        await message.answer(f"❌ Не могу запустить:\n<code>{result.error}</code>")
+        return False
+    if result.warnings:
+        warn_text = "\n".join(f"• {w}" for w in result.warnings)
+        await message.answer(f"⚠️ Подозрительные конструкции:\n{warn_text}")
+    return True
+
+
+async def _start_and_report(
+    message: Message,
+    *,
+    runner: BotRunner,
+    db: Database,
+    record: BotRecord,
+) -> None:
+    try:
+        cid = await runner.start(
+            tg_id=record.tg_id, bot_id=record.id, container_name=record.container_name
+        )
+    except Exception as exc:
+        logger.exception("failed to start bot %s", record.id)
+        await db.update_bot_status(bot_id=record.id, status="crashed", last_error=str(exc))
+        await message.answer(f"❌ Не удалось запустить:\n<code>{exc}</code>")
+        return
+    await db.update_bot_status(bot_id=record.id, status="running", container_id=cid)
+    fresh = await db.get_bot_by_id(record.id)
+    assert fresh is not None
+    await message.answer(
+        f"🟢 Бот <b>{fresh.name}</b> запущен.\nКоманды управления — на кнопках ниже.",
+        reply_markup=bot_actions_menu(fresh, is_running=True),
+    )
+
+
 @router.callback_query(F.data == "upload")
-async def cb_upload(call: CallbackQuery) -> None:
+async def cb_upload(call: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
     if isinstance(call.message, Message):
-        await call.message.answer("📤 Пришли мне .py файл со своим ботом одним сообщением.")
+        await call.message.answer(
+            "📤 Пришли <b>.py файл</b> со своим ботом (одним файлом, до 1 МБ).",
+            reply_markup=cancel_keyboard(),
+        )
     await call.answer()
 
 
@@ -30,87 +88,112 @@ async def handle_document(
     cfg: Config,
     db: Database,
     runner: BotRunner,
+    state: FSMContext,
 ) -> None:
-    if message.from_user is None or message.document is None:
-        return
     user = message.from_user
-
+    if user is None:
+        return
     await db.upsert_user(user.id, user.username)
 
-    sub = await db.active_subscription(user.id)
-    if sub is None:
+    sub = await db.get_subscription(user.id)
+    if sub is None or not sub.is_active():
         await message.answer(
-            "❌ Нет активной подписки.\n"
-            f"Купи её за <b>{cfg.subscription_stars}⭐</b> командой /buy и пришли файл снова."
+            "❌ Сначала купи подписку: /buy. Без активной подписки запустить бота нельзя."
         )
         return
 
-    file_name = message.document.file_name or ""
-    if not file_name.lower().endswith(".py"):
-        await message.answer("❌ Принимаются только файлы с расширением <code>.py</code>.")
+    source = await _download(message, bot)
+    if source is None:
+        return
+    if not await _validate_or_warn(message, source):
         return
 
-    file = await bot.get_file(message.document.file_id)
-    if file.file_path is None:
-        await message.answer("❌ Не удалось скачать файл, попробуй ещё раз.")
+    state_data = await state.get_data()
+    replace_bot_id = state_data.get("replace_bot_id")
+    if replace_bot_id is not None:
+        # Replace code path of an existing bot.
+        record = await db.get_bot_by_id(int(replace_bot_id))
+        if record is None or record.tg_id != user.id:
+            await state.clear()
+            await message.answer("❌ Бот не найден.")
+            return
+        await runner.stop(record.container_name, remove=True)
+        path = await runner.save_script(tg_id=user.id, bot_id=record.id, source=source)
+        await db.replace_bot_file(bot_id=record.id, file_path=str(path))
+        await state.clear()
+        await message.answer("🔁 Код заменён, перезапускаю бота…")
+        await _start_and_report(message, runner=runner, db=db, record=record)
         return
 
-    buf = await bot.download_file(file.file_path)
-    if buf is None:
-        await message.answer("❌ Не удалось скачать файл, попробуй ещё раз.")
-        return
-    source = buf.read()
-
-    result = validate_user_script(source)
-    if not result.ok:
-        await message.answer(f"❌ {result.error}")
-        return
-
-    notice = "🚀 Запускаю бота…"
-    if result.warnings:
-        warn_text = "\n".join(f"⚠️ {w}" for w in result.warnings)
-        notice = f"{warn_text}\n\n{notice}"
-
-    progress = await message.answer(notice)
-
-    path = await runner.save_script(user.id, source)
-    await db.upsert_bot(
-        tg_id=user.id,
-        file_path=str(path),
-        status="stopped",
-    )
-
-    try:
-        container_id = await runner.start(user.id)
-    except Exception as exc:  # noqa: BLE001 — surface error to the user
-        logger.exception("failed to start bot for user %s", user.id)
-        await db.upsert_bot(
-            tg_id=user.id,
-            file_path=str(path),
-            status="crashed",
-            last_error=str(exc),
-        )
-        await progress.edit_text(
-            f"❌ Не удалось запустить бота: <code>{exc}</code>\nПроверь код и пришли файл снова."
+    # New bot: ask for a name first.
+    bots = await db.list_bots_for_user(user.id)
+    if len(bots) >= sub.bot_quota:
+        await message.answer(
+            f"❌ По текущему тарифу можно держать только {sub.bot_quota} "
+            f"бот{'а' if 2 <= sub.bot_quota <= 4 else 'ов' if sub.bot_quota >= 5 else ''}.\n"
+            "Удалите неиспользуемых через /bots или возьмите тариф побольше."
         )
         return
+    if len(bots) >= cfg.max_bots_per_user:
+        await message.answer("❌ Превышен глобальный лимит ботов на пользователя.")
+        return
 
-    await db.upsert_bot(
-        tg_id=user.id,
-        file_path=str(path),
-        status="running",
-        container_id=container_id,
-    )
-    await progress.edit_text(
-        "✅ Бот запущен!\n"
-        f"Подписка активна до <b>{sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}</b>.\n\n"
-        "Команды управления: /mybot /restart /stop /logs"
-    )
-
-
-@router.message(F.text & ~F.text.startswith("/"))
-async def reject_text(message: Message) -> None:
-    """Friendly reminder if the user pastes raw text instead of a .py file."""
+    suggested = f"bot{len(bots) + 1}"
+    await state.set_state(UploadBot.waiting_for_name)
+    await state.update_data(pending_source=source.decode("utf-8", errors="replace"))
     await message.answer(
-        "📎 Пришли код одним <b>.py файлом</b>, а не текстом — так я смогу его запустить."
+        "✏️ Как назвать бота?\nЛатинские буквы/цифры/<code>_</code>/<code>-</code>, до 32 символов.\n\n"
+        f"Можешь просто написать <code>{suggested}</code> или своё.",
+        reply_markup=cancel_keyboard(),
     )
+
+
+@router.message(UploadBot.waiting_for_name, F.text)
+async def receive_bot_name(
+    message: Message,
+    cfg: Config,
+    db: Database,
+    runner: BotRunner,
+    state: FSMContext,
+) -> None:
+    user = message.from_user
+    if user is None or message.text is None:
+        return
+    name = slug_name(message.text)
+    if name is None:
+        await message.answer(
+            "❌ Имя должно быть из латинских букв/цифр/<code>_</code>/<code>-</code>, до 32 символов."
+        )
+        return
+
+    existing = await db.get_bot_by_name(user.id, name)
+    if existing is not None:
+        await message.answer("❌ Имя занято — выбери другое.")
+        return
+
+    data = await state.get_data()
+    pending_source = data.get("pending_source")
+    if not isinstance(pending_source, str):
+        await state.clear()
+        await message.answer("❌ Что-то пошло не так, повтори загрузку файла.")
+        return
+
+    source = pending_source.encode("utf-8")
+    container_name_placeholder = f"bothost_user_{user.id}_pending_{name}"
+    record = await db.create_bot(
+        tg_id=user.id,
+        name=name,
+        file_path="",
+        container_name=container_name_placeholder,
+    )
+    real_container_name = make_container_name(user.id, record.id)
+    await db.set_container_name(bot_id=record.id, container_name=real_container_name)
+
+    path = await runner.save_script(tg_id=user.id, bot_id=record.id, source=source)
+    await db.replace_bot_file(bot_id=record.id, file_path=str(path))
+    await state.clear()
+
+    fresh = await db.get_bot_by_id(record.id)
+    assert fresh is not None
+    await message.answer("✅ Сохранил, запускаю…")
+    await _start_and_report(message, runner=runner, db=db, record=fresh)
