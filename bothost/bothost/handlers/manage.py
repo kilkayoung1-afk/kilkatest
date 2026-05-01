@@ -5,18 +5,19 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
-from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
+from bothost import emoji as e
 from bothost.config import Config
 from bothost.db import BotRecord, Database, Subscription
 from bothost.keyboards import (
+    KBD_BOTS,
     bot_actions_menu,
     bots_list_menu,
     cancel_keyboard,
     confirm_delete,
-    main_menu,
+    reply_keyboard,
 )
 from bothost.runner import BotRunner, slug_name
 from bothost.states import RenameBot
@@ -30,11 +31,8 @@ async def _show_bots_list(target: Message, *, cfg: Config, db: Database, tg_id: 
     sub = await db.get_subscription(tg_id)
     if not bots:
         await target.answer(
-            "🤖 У вас пока нет ботов. Нажмите «📤 Загрузить бота» в меню, чтобы добавить.",
-            reply_markup=main_menu(
-                has_active_sub=sub is not None and sub.is_active(),
-                bot_count=0,
-            ),
+            f"{e.BOT} У вас пока нет ботов. Нажмите «Загрузить» снизу, чтобы добавить.",
+            reply_markup=reply_keyboard(),
         )
         return
     header = _bots_header(sub, len(bots))
@@ -44,10 +42,10 @@ async def _show_bots_list(target: Message, *, cfg: Config, db: Database, tg_id: 
 def _bots_header(sub: Subscription | None, count: int) -> str:
     if sub and sub.is_active():
         return (
-            f"🤖 <b>Ваши боты</b> ({count}/{sub.bot_quota})\n"
-            f"📅 Активна до {sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}"
+            f"{e.BOT} <b>Ваши боты</b> ({count}/{sub.bot_quota})\n"
+            f"{e.CALENDAR} Активна до {sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}"
         )
-    return f"🤖 <b>Ваши боты</b> ({count}). ⚠️ Подписка не активна — /buy."
+    return f"{e.BOT} <b>Ваши боты</b> ({count}). {e.CROSS} Подписка не активна."
 
 
 async def _show_single_bot(
@@ -64,22 +62,23 @@ async def _show_single_bot(
         await db.update_bot_status(bot_id=record.id, status="crashed")
         record = (await db.get_bot_by_id(record.id)) or record
     lines = [
-        f"🤖 <b>{record.name}</b>",
+        f"{e.BOT} <b>{record.name}</b>",
         f"Статус: {record.status}",
         f"Создан: {record.created_at.strftime('%Y-%m-%d %H:%M UTC')}",
     ]
     if record.last_error:
-        lines.append("⚠️ Последняя ошибка:")
+        lines.append(f"{e.CROSS} Последняя ошибка:")
         lines.append(f"<code>{record.last_error[:300]}</code>")
     await target.answer(
         "\n".join(lines), reply_markup=bot_actions_menu(record, is_running=is_running)
     )
 
 
-@router.message(Command("bots", "mybot"))
-async def cmd_bots(message: Message, cfg: Config, db: Database) -> None:
+@router.message(F.text == KBD_BOTS)
+async def kbd_bots(message: Message, cfg: Config, db: Database, state: FSMContext) -> None:
     if message.from_user is None:
         return
+    await state.clear()
     await _show_bots_list(message, cfg=cfg, db=db, tg_id=message.from_user.id)
 
 

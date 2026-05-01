@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
-from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
     LabeledPrice,
@@ -13,25 +12,21 @@ from aiogram.types import (
     PreCheckoutQuery,
 )
 
+from bothost import emoji as e
 from bothost.config import Config
 from bothost.db import Database
-from bothost.keyboards import plans_menu
+from bothost.keyboards import plans_menu, reply_keyboard
 from bothost.plans import find_plan
 
 logger = logging.getLogger(__name__)
 router = Router(name="payment")
 
 
-PLANS_HEADER = "💎 <b>Тарифы</b> — выбери план:"
+PLANS_HEADER = f"{e.COIN} <b>Тарифы</b> — выбери план:"
 
 
 async def _show_plans(message: Message, cfg: Config) -> None:
     await message.answer(PLANS_HEADER, reply_markup=plans_menu(cfg.plans))
-
-
-@router.message(Command("buy"))
-async def handle_buy(message: Message, cfg: Config) -> None:
-    await _show_plans(message, cfg)
 
 
 @router.callback_query(F.data == "buy")
@@ -82,7 +77,7 @@ async def on_successful_payment(message: Message, cfg: Config, db: Database) -> 
     if plan is None:
         logger.error("payment for unknown plan_id=%s", plan_id)
         await message.answer(
-            "⚠️ Оплата получена, но тариф не найден в конфиге. Свяжитесь с администратором."
+            f"{e.CROSS} Оплата получена, но тариф не найден в конфиге. Свяжитесь с администратором."
         )
         return
     sub = await db.apply_payment(
@@ -102,8 +97,11 @@ async def on_successful_payment(message: Message, cfg: Config, db: Database) -> 
         sub.expires_at.isoformat(),
     )
     await message.answer(
-        "✅ Оплата получена!\n"
-        f"📅 Подписка активна до <b>{sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}</b>\n"
-        f"🎟 Лимит ботов: <b>{sub.bot_quota}</b>\n\n"
-        "Можешь загружать <code>.py</code> файлы — командой /bots увидишь свой парк."
+        f"{e.CHECK} Оплата получена!\n"
+        f"{e.CALENDAR} Подписка активна до "
+        f"<b>{sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}</b>\n"
+        f"{e.TAG} Лимит ботов: <b>{sub.bot_quota}</b>\n\n"
+        f"{e.PAPERCLIP} Можешь загружать <code>.py</code> или <code>.zip</code> файлы — "
+        f"кнопка «Загрузить» снизу.",
+        reply_markup=reply_keyboard(),
     )

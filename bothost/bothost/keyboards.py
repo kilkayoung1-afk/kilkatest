@@ -1,88 +1,58 @@
-"""Inline keyboards used across the parent bot.
+"""Keyboards used across the parent bot — both inline and reply.
 
-All button icons are set via `icon_custom_emoji_id` (Bot API 9.4+) — Premium
-users see animated custom emoji, non-premium users see the button text without
-an icon. Buttons therefore should NOT carry plain Unicode emojis in their
-`text` field; the icon is the icon_custom_emoji_id, the text is plain text.
+Button icons use `icon_custom_emoji_id` (Bot API 9.4+) — Premium users see
+animated custom emoji, others see plain text. Buttons therefore should NOT
+carry plain Unicode emojis in their `text` field.
 """
 
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
 from bothost.db import BotRecord, Subscription
 from bothost.emoji import ID
 from bothost.plans import Plan
 
+# --- reply (persistent bottom) keyboard ---------------------------------------
 
-def main_menu(*, has_active_sub: bool, bot_count: int) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    if has_active_sub:
-        rows.append(
+# button labels — referenced by F.text matchers in handlers
+KBD_UPLOAD = "Загрузить"
+KBD_BOTS = "Мои боты"
+KBD_BUY = "Купить"
+KBD_STATUS = "Подписка"
+KBD_HELP = "Помощь"
+KBD_TERMS = "Политика"
+
+KBD_ALL = {KBD_UPLOAD, KBD_BOTS, KBD_BUY, KBD_STATUS, KBD_HELP, KBD_TERMS}
+
+
+def reply_keyboard() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
             [
-                InlineKeyboardButton(
-                    text="Загрузить бота",
-                    callback_data="upload",
-                    icon_custom_emoji_id=ID.SEND,
-                ),
-                InlineKeyboardButton(
-                    text="Мои боты",
-                    callback_data="bots",
-                    icon_custom_emoji_id=ID.BOT,
-                ),
-            ]
-        )
-        rows.append(
+                KeyboardButton(text=KBD_UPLOAD, icon_custom_emoji_id=ID.SEND),
+                KeyboardButton(text=KBD_BOTS, icon_custom_emoji_id=ID.BOT),
+            ],
             [
-                InlineKeyboardButton(
-                    text="Подписка",
-                    callback_data="status",
-                    icon_custom_emoji_id=ID.STATS,
-                ),
-                InlineKeyboardButton(
-                    text="Продлить",
-                    callback_data="buy",
-                    icon_custom_emoji_id=ID.CALENDAR,
-                ),
-            ]
-        )
-    else:
-        rows.append(
+                KeyboardButton(text=KBD_BUY, icon_custom_emoji_id=ID.COIN),
+                KeyboardButton(text=KBD_STATUS, icon_custom_emoji_id=ID.STATS),
+            ],
             [
-                InlineKeyboardButton(
-                    text="Купить подписку",
-                    callback_data="buy",
-                    icon_custom_emoji_id=ID.COIN,
-                )
-            ]
-        )
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="Статус",
-                    callback_data="status",
-                    icon_custom_emoji_id=ID.STATS,
-                )
-            ]
-        )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="Помощь",
-                callback_data="help",
-                icon_custom_emoji_id=ID.INFO,
-            ),
-            InlineKeyboardButton(
-                text="Политика",
-                callback_data="terms",
-                icon_custom_emoji_id=ID.LOCK_CLOSED,
-            ),
-        ]
+                KeyboardButton(text=KBD_HELP, icon_custom_emoji_id=ID.INFO),
+                KeyboardButton(text=KBD_TERMS, icon_custom_emoji_id=ID.LOCK_CLOSED),
+            ],
+        ],
+        resize_keyboard=True,
+        is_persistent=True,
     )
-    if bot_count == 0 and has_active_sub:
-        # subtle hint for the very first upload
-        pass
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+# --- inline (per-message) keyboards -------------------------------------------
 
 
 def plans_menu(plans: list[Plan]) -> InlineKeyboardMarkup:

@@ -20,15 +20,10 @@ from bothost.scheduler import ExpirationService
 logger = logging.getLogger(__name__)
 
 
-PUBLIC_COMMANDS: list[BotCommand] = [
-    BotCommand(command="start", description="Главное меню"),
-    BotCommand(command="buy", description="Купить подписку"),
-    BotCommand(command="bots", description="Мои боты"),
-    BotCommand(command="status", description="Статус подписки"),
-    BotCommand(command="help", description="Помощь"),
-    BotCommand(command="terms", description="Условия использования"),
-    BotCommand(command="privacy", description="Конфиденциальность"),
-]
+# Slash-command suggestions are intentionally empty — the bot is fully button-driven
+# (persistent reply keyboard + inline buttons). Only /start is kept as a handler
+# because Telegram requires it when a user first opens the bot.
+PUBLIC_COMMANDS: list[BotCommand] = []
 
 
 async def _run() -> None:
@@ -57,7 +52,10 @@ async def _run() -> None:
     me = await bot.get_me()
     logger.info("starting parent bot @%s (id=%s)", me.username, me.id)
     try:
-        await bot.set_my_commands(PUBLIC_COMMANDS)
+        # Clear the slash-command suggestions: bot is button-driven.
+        await bot.delete_my_commands()
+        if PUBLIC_COMMANDS:
+            await bot.set_my_commands(PUBLIC_COMMANDS)
     except Exception as exc:  # pragma: no cover - non-critical
         logger.warning("set_my_commands failed: %s", exc)
     try:

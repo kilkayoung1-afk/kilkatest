@@ -1,15 +1,27 @@
-"""/start, /help, main-menu and status callbacks."""
+"""/start handler, reply-keyboard text handlers, help/status/policy."""
 
 from __future__ import annotations
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bothost import emoji as e
 from bothost.config import Config
 from bothost.db import Database
-from bothost.keyboards import main_menu, status_lines
+from bothost.keyboards import (
+    KBD_BUY,
+    KBD_HELP,
+    KBD_STATUS,
+    KBD_TERMS,
+    KBD_UPLOAD,
+    cancel_keyboard,
+    plans_menu,
+    reply_keyboard,
+    status_lines,
+)
+from bothost.states import UploadBot
 
 router = Router(name="start")
 
@@ -20,12 +32,11 @@ WELCOME = (
     f"{e.COIN} Покупаешь подписку (от <b>50⭐ за 14 дней</b>).\n"
     f"{e.PAPERCLIP} Присылаешь <b>.py</b> файл или <b>.zip</b> архив с проектом — я попрошу имя и запущу.\n"
     f"{e.BOT} Можешь держать сразу несколько ботов (по тарифу).\n\n"
-    f"Управление кнопками или командами:\n"
-    f"• /buy — подписка\n"
-    f"• /bots — мои боты\n"
-    f"• /status — состояние\n"
-    f"• /help — подробнее"
+    f"Управляй ботом кнопками снизу 👇"
 )
+
+
+PLANS_HEADER = f"{e.COIN} <b>Тарифы</b> — выбери план:"
 
 HELP = (
     f"{e.INFO} <b>Подробнее</b>\n\n"
@@ -106,15 +117,25 @@ PRIVACY = (
 )
 
 
-async def _show_menu(target: Message, cfg: Config, db: Database, tg_id: int) -> None:
+async def _show_status(target: Message, cfg: Config, db: Database, tg_id: int) -> None:
     sub = await db.get_subscription(tg_id)
     bots = await db.list_bots_for_user(tg_id)
-    has_active = sub is not None and sub.is_active()
     text = WELCOME + "\n\n" + status_lines(sub, bots)
-    await target.answer(
-        text,
-        reply_markup=main_menu(has_active_sub=has_active, bot_count=len(bots)),
+    await target.answer(text, reply_markup=reply_keyboard())
+
+
+async def _prompt_upload(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        f"{e.PAPERCLIP} Пришли <b>.py файл</b> (до 1 МБ) "
+        f"или <b>.zip архив</b> (до 5 МБ) с <code>bot.py</code> в корне.\n\n"
+        f"В архив можно положить <code>requirements.txt</code> — установлю зависимости.",
+        reply_markup=cancel_keyboard(),
     )
+
+
+# /start is the only slash command for end users (Telegram requires it for bot
+# entry). Everything else goes through the persistent reply keyboard below.
 
 
 @router.message(CommandStart())
@@ -123,29 +144,57 @@ async def handle_start(message: Message, cfg: Config, db: Database) -> None:
     if user is None:
         return
     await db.upsert_user(tg_id=user.id, username=user.username)
-    await _show_menu(message, cfg, db, user.id)
+    await _show_status(message, cfg, db, user.id)
 
 
-@router.message(Command("help"))
-async def handle_help(message: Message) -> None:
-    await message.answer(HELP)
+# --- reply-keyboard text handlers --------------------------------------------
 
 
-@router.message(Command("terms"))
-async def handle_terms(message: Message) -> None:
-    await message.answer(TERMS, disable_web_page_preview=True)
-
-
-@router.message(Command("privacy"))
-async def handle_privacy(message: Message) -> None:
-    await message.answer(PRIVACY, disable_web_page_preview=True)
-
-
-@router.message(Command("status"))
-async def handle_status(message: Message, cfg: Config, db: Database) -> None:
+@router.message(F.text == KBD_STATUS)
+async def kbd_status(message: Message, cfg: Config, db: Database, state: FSMContext) -> None:
     if message.from_user is None:
         return
-    await _show_menu(message, cfg, db, message.from_user.id)
+    await state.clear()
+    await _show_status(message, cfg, db, message.from_user.id)
+
+
+@router.message(F.text == KBD_HELP)
+async def kbd_help(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(HELP, reply_markup=reply_keyboard())
+
+
+@router.message(F.text == KBD_TERMS)
+async def kbd_terms(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(TERMS, disable_web_page_preview=True)
+    await message.answer(PRIVACY, disable_web_page_preview=True, reply_markup=reply_keyboard())
+
+
+@router.message(F.text == KBD_BUY)
+async def kbd_buy(message: Message, cfg: Config, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(PLANS_HEADER, reply_markup=plans_menu(cfg.plans))
+
+
+@router.message(F.text == KBD_UPLOAD)
+async def kbd_upload(message: Message, state: FSMContext) -> None:
+    if message.from_user is None:
+        return
+    # only allow upload if user is not already in the middle of an FSM flow
+    current = await state.get_state()
+    if current == UploadBot.waiting_for_name.state:
+        await message.answer(
+            f"{e.INFO} Сначала пришли имя для предыдущего бота — или нажми «Отмена»."
+        )
+        return
+    await _prompt_upload(message, state)
+
+
+# KBD_BOTS handler is in handlers/manage.py (depends on _show_bots_list).
+
+
+# --- inline-callback handlers -------------------------------------------------
 
 
 @router.callback_query(F.data == "help")
@@ -164,11 +213,12 @@ async def cb_terms(call: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "menu")
-async def cb_menu(call: CallbackQuery, cfg: Config, db: Database) -> None:
+async def cb_menu(call: CallbackQuery, cfg: Config, db: Database, state: FSMContext) -> None:
     if call.from_user is None or not isinstance(call.message, Message):
         await call.answer()
         return
-    await _show_menu(call.message, cfg, db, call.from_user.id)
+    await state.clear()
+    await _show_status(call.message, cfg, db, call.from_user.id)
     await call.answer()
 
 
@@ -177,5 +227,5 @@ async def cb_status(call: CallbackQuery, cfg: Config, db: Database) -> None:
     if call.from_user is None or not isinstance(call.message, Message):
         await call.answer()
         return
-    await _show_menu(call.message, cfg, db, call.from_user.id)
+    await _show_status(call.message, cfg, db, call.from_user.id)
     await call.answer()
