@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bothost"
+version = "0.1.0"
+description = "Telegram bot that hosts user-submitted Python bots, paid via Telegram Stars."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "kilkayoung1-afk" }]
+license = { text = "MIT" }
+dependencies = [
+    "aiogram==3.27.0",
+    "aiosqlite==0.20.0",
+    "APScheduler==3.10.4",
+    "docker==7.1.0",
+    "python-dotenv==1.0.1",
+]
+
+[project.scripts]
+bothost = "bothost.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["bothost*"]
+exclude = ["tests*", "data*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["E501", "B008"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_return_any = true
+ignore_missing_imports = true

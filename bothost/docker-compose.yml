@@ -1,0 +1,22 @@
+services:
+  # Pre-build the user-bot base image so user containers start in seconds.
+  userbot-image:
+    build:
+      context: ./userbot
+    image: bothost-userbot:latest
+    command: ["true"]
+
+  bothost:
+    build: .
+    container_name: bothost
+    image: bothost-parent:latest
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      USER_BOTS_DIR_HOST: ${PWD}/data/userbots
+    volumes:
+      - ./data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      userbot-image:
+        condition: service_completed_successfully
