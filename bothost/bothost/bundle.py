@@ -55,6 +55,21 @@ def _is_safe_member(name: str) -> bool:
     return True
 
 
+def _has_allowed_extension(filename: str) -> bool:
+    """Whitelist check that handles dotfiles (e.g. `.env`, `.gitignore`).
+
+    `Path('.env').suffix` is `''` because Python treats leading-dot files as
+    extension-less; fall back to the full base name in that case.
+    """
+    base = Path(filename).name
+    suffix = Path(base).suffix.lower()
+    if suffix in ALLOWED_SUFFIXES:
+        return True
+    if not suffix and base.startswith(".") and base.lower() in ALLOWED_SUFFIXES:
+        return True
+    return False
+
+
 def _validate_requirement_line(line: str) -> str | None:
     line = line.strip()
     if not line or line.startswith("#"):
@@ -136,7 +151,7 @@ async def extract_zip(*, archive_bytes: bytes, target_dir: Path) -> BundleResult
                         ok=False,
                         error=f"Подозрительный путь в архиве: {m.filename!r}.",
                     )
-                if Path(m.filename).suffix.lower() not in ALLOWED_SUFFIXES:
+                if not _has_allowed_extension(m.filename):
                     return BundleResult(
                         ok=False,
                         error=(

@@ -348,3 +348,17 @@ def test_bundle_rejects_vcs_requirement(tmp_path: Path) -> None:
     result = asyncio.run(extract_zip(archive_bytes=buf.getvalue(), target_dir=tmp_path / "y"))
     assert not result.ok
     assert "VCS" in (result.error or "")
+
+
+def test_bundle_accepts_dotenv_file(tmp_path: Path) -> None:
+    import io
+    import zipfile
+
+    from bothost.bundle import extract_zip
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("bot.py", b"print('hi')\n")
+        zf.writestr("tgbot/.env", b"KEY=value\n")
+    result = asyncio.run(extract_zip(archive_bytes=buf.getvalue(), target_dir=tmp_path / "z"))
+    assert result.ok, result.error
