@@ -15,7 +15,7 @@ from aiogram.types import (
 from bothost import emoji as e
 from bothost.config import Config
 from bothost.db import Database
-from bothost.keyboards import plans_menu, reply_keyboard
+from bothost.keyboards import main_menu, plans_menu
 from bothost.plans import find_plan
 
 logger = logging.getLogger(__name__)
@@ -108,6 +108,6 @@ async def on_successful_payment(message: Message, cfg: Config, db: Database) -> 
         f"<b>{sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}</b>\n"
         f"{e.TAG} Лимиты бота: <b>{plan.short_resources()}</b>\n\n"
         f"{e.PAPERCLIP} Можешь загружать <code>.py</code> или <code>.zip</code> файлы — "
-        f"кнопка «Загрузить» снизу.",
-        reply_markup=reply_keyboard(),
+        f"кнопка «Загрузить» в меню.",
+        reply_markup=main_menu(),
     )

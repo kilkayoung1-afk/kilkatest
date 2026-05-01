@@ -1,58 +1,55 @@
-"""Keyboards used across the parent bot — both inline and reply.
+"""Inline keyboards used across the parent bot.
 
-Button icons use `icon_custom_emoji_id` (Bot API 9.4+) — Premium users see
-animated custom emoji, others see plain text. Buttons therefore should NOT
-carry plain Unicode emojis in their `text` field.
+All buttons attach two presentation hints:
+- `icon_custom_emoji_id` — Premium custom-emoji icon shown before the label
+  (Bot API 9.4+; falls back to plain text on non-Premium clients).
+- `style` — accent color: "primary" (blue), "success" (green), "danger" (red);
+  omitted = neutral grey. Clients that don't support `style` ignore it.
+
+Buttons therefore should NOT carry plain Unicode emoji in their `text` field.
 """
 
 from __future__ import annotations
 
-from aiogram.types import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-)
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bothost.db import BotRecord, Subscription
 from bothost.emoji import ID
 from bothost.plans import Plan
 
-# --- reply (persistent bottom) keyboard ---------------------------------------
 
-# button labels — referenced by F.text matchers in handlers
-KBD_UPLOAD = "Загрузить"
-KBD_BOTS = "Мои боты"
-KBD_BUY = "Купить"
-KBD_STATUS = "Подписка"
-KBD_HELP = "Помощь"
-KBD_TERMS = "Политика"
-
-KBD_ALL = {KBD_UPLOAD, KBD_BOTS, KBD_BUY, KBD_STATUS, KBD_HELP, KBD_TERMS}
-
-
-def reply_keyboard() -> ReplyKeyboardMarkup:
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [
-                KeyboardButton(text=KBD_UPLOAD, icon_custom_emoji_id=ID.SEND),
-                KeyboardButton(text=KBD_BOTS, icon_custom_emoji_id=ID.BOT),
-            ],
-            [
-                KeyboardButton(text=KBD_BUY, icon_custom_emoji_id=ID.COIN),
-                KeyboardButton(text=KBD_STATUS, icon_custom_emoji_id=ID.STATS),
-            ],
-            [
-                KeyboardButton(text=KBD_HELP, icon_custom_emoji_id=ID.INFO),
-                KeyboardButton(text=KBD_TERMS, icon_custom_emoji_id=ID.LOCK_CLOSED),
-            ],
-        ],
-        resize_keyboard=True,
-        is_persistent=True,
+def _btn(
+    text: str,
+    callback_data: str,
+    *,
+    style: str | None = None,
+    icon: str | None = None,
+) -> InlineKeyboardButton:
+    return InlineKeyboardButton(
+        text=text,
+        callback_data=callback_data,
+        style=style,
+        icon_custom_emoji_id=icon,
     )
 
 
-# --- inline (per-message) keyboards -------------------------------------------
+def main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                _btn("Загрузить", "upload", style="primary", icon=ID.SEND),
+                _btn("Мои боты", "bots", style="primary", icon=ID.BOT),
+            ],
+            [
+                _btn("Купить", "buy", style="success", icon=ID.COIN),
+                _btn("Подписка", "status", icon=ID.STATS),
+            ],
+            [
+                _btn("Помощь", "help", icon=ID.INFO),
+                _btn("Политика", "terms", icon=ID.LOCK_CLOSED),
+            ],
+        ]
+    )
 
 
 def plans_menu(plans: list[Plan]) -> InlineKeyboardMarkup:
@@ -60,22 +57,15 @@ def plans_menu(plans: list[Plan]) -> InlineKeyboardMarkup:
     for plan in plans:
         rows.append(
             [
-                InlineKeyboardButton(
-                    text=plan.label(),
-                    callback_data=f"buy:{plan.id}",
-                    icon_custom_emoji_id=ID.COIN_SEND,
+                _btn(
+                    plan.label(),
+                    f"buy:{plan.id}",
+                    style="success",
+                    icon=ID.COIN_SEND,
                 )
             ]
         )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="Назад",
-                callback_data="menu",
-                icon_custom_emoji_id=ID.DOWN,
-            )
-        ]
-    )
+    rows.append([_btn("Назад", "menu", icon=ID.DOWN)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -90,25 +80,17 @@ def bots_list_menu(records: list[BotRecord]) -> InlineKeyboardMarkup:
     for r in records:
         rows.append(
             [
-                InlineKeyboardButton(
-                    text=r.name,
-                    callback_data=f"bot:{r.id}",
-                    icon_custom_emoji_id=icon_by_status.get(r.status, ID.LOCK_CLOSED),
+                _btn(
+                    r.name,
+                    f"bot:{r.id}",
+                    icon=icon_by_status.get(r.status, ID.LOCK_CLOSED),
                 )
             ]
         )
     rows.append(
         [
-            InlineKeyboardButton(
-                text="Загрузить нового",
-                callback_data="upload",
-                icon_custom_emoji_id=ID.SEND,
-            ),
-            InlineKeyboardButton(
-                text="Меню",
-                callback_data="menu",
-                icon_custom_emoji_id=ID.DOWN,
-            ),
+            _btn("Загрузить нового", "upload", style="primary", icon=ID.SEND),
+            _btn("Меню", "menu", icon=ID.DOWN),
         ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -119,65 +101,54 @@ def bot_actions_menu(record: BotRecord, *, is_running: bool) -> InlineKeyboardMa
     if is_running:
         rows.append(
             [
-                InlineKeyboardButton(
-                    text="Перезапустить",
-                    callback_data=f"act:restart:{record.id}",
-                    icon_custom_emoji_id=ID.LOADING,
+                _btn(
+                    "Перезапустить",
+                    f"act:restart:{record.id}",
+                    style="primary",
+                    icon=ID.LOADING,
                 ),
-                InlineKeyboardButton(
-                    text="Остановить",
-                    callback_data=f"act:stop:{record.id}",
-                    icon_custom_emoji_id=ID.CROSS,
+                _btn(
+                    "Остановить",
+                    f"act:stop:{record.id}",
+                    style="danger",
+                    icon=ID.CROSS,
                 ),
             ]
         )
     else:
         rows.append(
             [
-                InlineKeyboardButton(
-                    text="Запустить",
-                    callback_data=f"act:start:{record.id}",
-                    icon_custom_emoji_id=ID.CHECK,
+                _btn(
+                    "Запустить",
+                    f"act:start:{record.id}",
+                    style="success",
+                    icon=ID.CHECK,
                 )
             ]
         )
     rows.append(
         [
-            InlineKeyboardButton(
-                text="Логи",
-                callback_data=f"act:logs:{record.id}",
-                icon_custom_emoji_id=ID.DOWN,
-            ),
-            InlineKeyboardButton(
-                text="Переименовать",
-                callback_data=f"act:rename:{record.id}",
-                icon_custom_emoji_id=ID.PENCIL,
-            ),
+            _btn("Логи", f"act:logs:{record.id}", icon=ID.DOWN),
+            _btn("Переименовать", f"act:rename:{record.id}", icon=ID.PENCIL),
         ]
     )
     rows.append(
         [
-            InlineKeyboardButton(
-                text="Заменить код",
-                callback_data=f"act:replace:{record.id}",
-                icon_custom_emoji_id=ID.CODE,
+            _btn(
+                "Заменить код",
+                f"act:replace:{record.id}",
+                style="primary",
+                icon=ID.CODE,
             ),
-            InlineKeyboardButton(
-                text="Удалить",
-                callback_data=f"act:delete:{record.id}",
-                icon_custom_emoji_id=ID.TRASH,
+            _btn(
+                "Удалить",
+                f"act:delete:{record.id}",
+                style="danger",
+                icon=ID.TRASH,
             ),
         ]
     )
-    rows.append(
-        [
-            InlineKeyboardButton(
-                text="К списку",
-                callback_data="bots",
-                icon_custom_emoji_id=ID.DOWN,
-            )
-        ]
-    )
+    rows.append([_btn("К списку", "bots", icon=ID.DOWN)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -185,33 +156,24 @@ def confirm_delete(bot_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text="Удалить",
-                    callback_data=f"act:delete_confirm:{bot_id}",
-                    icon_custom_emoji_id=ID.TRASH,
+                _btn(
+                    "Да, удалить",
+                    f"act:delete_confirm:{bot_id}",
+                    style="danger",
+                    icon=ID.TRASH,
                 ),
-                InlineKeyboardButton(
-                    text="Отмена",
-                    callback_data=f"bot:{bot_id}",
-                    icon_custom_emoji_id=ID.DOWN,
-                ),
+                _btn("Отмена", f"bot:{bot_id}", icon=ID.DOWN),
             ]
         ]
     )
 
 
 def cancel_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="Отмена",
-                    callback_data="menu",
-                    icon_custom_emoji_id=ID.DOWN,
-                )
-            ]
-        ]
-    )
+    return InlineKeyboardMarkup(inline_keyboard=[[_btn("Отмена", "menu", icon=ID.DOWN)]])
+
+
+def back_to_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[_btn("Меню", "menu", icon=ID.DOWN)]])
 
 
 def status_lines(sub: Subscription | None, bots: list[BotRecord]) -> str:
@@ -238,7 +200,7 @@ def status_lines(sub: Subscription | None, bots: list[BotRecord]) -> str:
         )
         lines.append(f"{e.COIN} Всего оплачено: {sub.total_paid_stars}")
     else:
-        lines.append(f"{e.CALENDAR} Подписка не активна. Нажми /buy.")
+        lines.append(f"{e.CALENDAR} Подписка не активна. Нажми «Купить».")
     if bots:
         lines.append("")
         lines.append(f"{e.BOT} Боты ({len(bots)}):")
@@ -253,5 +215,5 @@ def status_lines(sub: Subscription | None, bots: list[BotRecord]) -> str:
             lines.append(f"  {marker} {r.name} — {r.status}")
     else:
         lines.append("")
-        lines.append(f"{e.PAPERCLIP} Загрузите .py или .zip — кнопка «Загрузить бота».")
+        lines.append(f"{e.PAPERCLIP} Загрузите .py или .zip — кнопка «Загрузить».")
     return "\n".join(lines)

@@ -1,24 +1,19 @@
-"""/start handler, reply-keyboard text handlers, help/status/policy."""
+"""/start handler and inline-callback handlers for menu/help/status/policy."""
 
 from __future__ import annotations
 
 from aiogram import F, Router
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove
 
 from bothost import emoji as e
 from bothost.config import Config
 from bothost.db import Database
 from bothost.keyboards import (
-    KBD_BUY,
-    KBD_HELP,
-    KBD_STATUS,
-    KBD_TERMS,
-    KBD_UPLOAD,
+    back_to_menu,
     cancel_keyboard,
-    plans_menu,
-    reply_keyboard,
+    main_menu,
     status_lines,
 )
 from bothost.states import UploadBot
@@ -31,12 +26,10 @@ WELCOME = (
     f"Как это работает:\n"
     f"{e.COIN} Покупаешь подписку (от <b>50⭐ за 14 дней</b>).\n"
     f"{e.PAPERCLIP} Присылаешь <b>.py</b> файл или <b>.zip</b> архив с проектом — я попрошу имя и запущу.\n"
-    f"{e.BOT} Можешь держать сразу несколько ботов (по тарифу).\n\n"
-    f"Управляй ботом кнопками снизу 👇"
+    f"{e.BOT} 1 тариф = 1 бот с фиксированными лимитами RAM/CPU/диска.\n\n"
+    f"Выбери действие:"
 )
 
-
-PLANS_HEADER = f"{e.COIN} <b>Тарифы</b> — выбери план:"
 
 HELP = (
     f"{e.INFO} <b>Подробнее</b>\n\n"
@@ -124,7 +117,7 @@ async def _show_status(target: Message, cfg: Config, db: Database, tg_id: int) -
     sub = await db.get_subscription(tg_id)
     bots = await db.list_bots_for_user(tg_id)
     text = WELCOME + "\n\n" + status_lines(sub, bots)
-    await target.answer(text, reply_markup=reply_keyboard())
+    await target.answer(text, reply_markup=main_menu())
 
 
 async def _prompt_upload(message: Message, state: FSMContext) -> None:
@@ -138,7 +131,7 @@ async def _prompt_upload(message: Message, state: FSMContext) -> None:
 
 
 # /start is the only slash command for end users (Telegram requires it for bot
-# entry). Everything else goes through the persistent reply keyboard below.
+# entry). Every other action is reachable via inline buttons.
 
 
 @router.message(CommandStart())
@@ -147,56 +140,13 @@ async def handle_start(message: Message, cfg: Config, db: Database) -> None:
     if user is None:
         return
     await db.upsert_user(tg_id=user.id, username=user.username)
+    # silently drop any persistent reply-keyboard from earlier versions
+    cleanup = await message.answer(".", reply_markup=ReplyKeyboardRemove())
+    try:
+        await cleanup.delete()
+    except Exception:  # noqa: BLE001 - best-effort cleanup
+        pass
     await _show_status(message, cfg, db, user.id)
-
-
-# --- reply-keyboard text handlers --------------------------------------------
-
-
-@router.message(F.text == KBD_STATUS)
-async def kbd_status(message: Message, cfg: Config, db: Database, state: FSMContext) -> None:
-    if message.from_user is None:
-        return
-    await state.clear()
-    await _show_status(message, cfg, db, message.from_user.id)
-
-
-@router.message(F.text == KBD_HELP)
-async def kbd_help(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer(HELP, reply_markup=reply_keyboard())
-
-
-@router.message(F.text == KBD_TERMS)
-async def kbd_terms(message: Message, cfg: Config, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer(render_terms(cfg), disable_web_page_preview=True)
-    await message.answer(
-        render_privacy(cfg), disable_web_page_preview=True, reply_markup=reply_keyboard()
-    )
-
-
-@router.message(F.text == KBD_BUY)
-async def kbd_buy(message: Message, cfg: Config, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer(PLANS_HEADER, reply_markup=plans_menu(cfg.plans))
-
-
-@router.message(F.text == KBD_UPLOAD)
-async def kbd_upload(message: Message, state: FSMContext) -> None:
-    if message.from_user is None:
-        return
-    # only allow upload if user is not already in the middle of an FSM flow
-    current = await state.get_state()
-    if current == UploadBot.waiting_for_name.state:
-        await message.answer(
-            f"{e.INFO} Сначала пришли имя для предыдущего бота — или нажми «Отмена»."
-        )
-        return
-    await _prompt_upload(message, state)
-
-
-# KBD_BOTS handler is in handlers/manage.py (depends on _show_bots_list).
 
 
 # --- inline-callback handlers -------------------------------------------------
@@ -205,7 +155,7 @@ async def kbd_upload(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "help")
 async def cb_help(call: CallbackQuery) -> None:
     if isinstance(call.message, Message):
-        await call.message.answer(HELP)
+        await call.message.answer(HELP, reply_markup=back_to_menu())
     await call.answer()
 
 
@@ -213,7 +163,11 @@ async def cb_help(call: CallbackQuery) -> None:
 async def cb_terms(call: CallbackQuery, cfg: Config) -> None:
     if isinstance(call.message, Message):
         await call.message.answer(render_terms(cfg), disable_web_page_preview=True)
-        await call.message.answer(render_privacy(cfg), disable_web_page_preview=True)
+        await call.message.answer(
+            render_privacy(cfg),
+            disable_web_page_preview=True,
+            reply_markup=back_to_menu(),
+        )
     await call.answer()
 
 
@@ -233,4 +187,17 @@ async def cb_status(call: CallbackQuery, cfg: Config, db: Database) -> None:
         await call.answer()
         return
     await _show_status(call.message, cfg, db, call.from_user.id)
+    await call.answer()
+
+
+@router.callback_query(F.data == "upload")
+async def cb_upload(call: CallbackQuery, state: FSMContext) -> None:
+    if call.from_user is None or not isinstance(call.message, Message):
+        await call.answer()
+        return
+    current = await state.get_state()
+    if current == UploadBot.waiting_for_name.state:
+        await call.answer("Сначала пришли имя для предыдущего бота.", show_alert=True)
+        return
+    await _prompt_upload(call.message, state)
     await call.answer()

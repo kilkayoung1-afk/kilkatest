@@ -12,12 +12,11 @@ from bothost import emoji as e
 from bothost.config import Config
 from bothost.db import BotRecord, Database, Subscription
 from bothost.keyboards import (
-    KBD_BOTS,
     bot_actions_menu,
     bots_list_menu,
     cancel_keyboard,
     confirm_delete,
-    reply_keyboard,
+    main_menu,
 )
 from bothost.runner import BotRunner, slug_name
 from bothost.states import RenameBot
@@ -56,8 +55,8 @@ async def _show_bots_list(target: Message, *, cfg: Config, db: Database, tg_id: 
     sub = await db.get_subscription(tg_id)
     if not bots:
         await target.answer(
-            f"{e.BOT} У вас пока нет ботов. Нажмите «Загрузить» снизу, чтобы добавить.",
-            reply_markup=reply_keyboard(),
+            f"{e.BOT} У вас пока нет ботов. Нажмите «Загрузить» в меню, чтобы добавить.",
+            reply_markup=main_menu(),
         )
         return
     header = _bots_header(sub, len(bots))
@@ -67,11 +66,11 @@ async def _show_bots_list(target: Message, *, cfg: Config, db: Database, tg_id: 
 def _bots_header(sub: Subscription | None, count: int) -> str:
     if sub and sub.is_active():
         return (
-            f"{e.BOT} <b>Ваши боты</b> ({count}/{sub.bot_quota})\n"
-            f"{e.CALENDAR} Активна до {sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
-            f"{e.TAG} Лимиты бота: {_resources_text(sub.mem_mb, sub.cpu_quota, sub.disk_mb)}"
+            f"{e.BOT} <b>Твой бот</b>\n"
+            f"{e.CALENDAR} Подписка до {sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
+            f"{e.TAG} Лимиты: {_resources_text(sub.mem_mb, sub.cpu_quota, sub.disk_mb)}"
         )
-    return f"{e.BOT} <b>Ваши боты</b> ({count}). {e.CROSS} Подписка не активна."
+    return f"{e.BOT} <b>Боты</b> ({count}). {e.CROSS} Подписка не активна."
 
 
 def _resources_text(mem_mb: int, cpu_quota: float, disk_mb: int) -> str:
@@ -110,14 +109,6 @@ async def _show_single_bot(
     await target.answer(
         "\n".join(lines), reply_markup=bot_actions_menu(record, is_running=is_running)
     )
-
-
-@router.message(F.text == KBD_BOTS)
-async def kbd_bots(message: Message, cfg: Config, db: Database, state: FSMContext) -> None:
-    if message.from_user is None:
-        return
-    await state.clear()
-    await _show_bots_list(message, cfg=cfg, db=db, tg_id=message.from_user.id)
 
 
 @router.callback_query(F.data == "bots")
