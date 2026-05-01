@@ -13,29 +13,21 @@ _SUSPICIOUS_CALLS: set[str] = {"eval", "exec", "compile"}
 
 # Hard-block patterns (regex on raw source) — typical stealer/malware signatures.
 _DENY_PATTERNS: list[tuple[str, str]] = [
-    (r"\.ssh/(id_rsa|id_ed25519|authorized_keys|known_hosts)",
-     "доступ к SSH-ключам хоста"),
-    (r"\.aws/credentials|\.aws/config",
-     "доступ к AWS credentials"),
-    (r"/etc/(shadow|passwd|sudoers)",
-     "чтение системных файлов"),
-    (r"~/\.config/(google-chrome|chromium|Mozilla|BraveSoftware|Microsoft/Edge)",
-     "сбор браузерных данных"),
-    (r"Login Data|Cookies|Web Data|Local State",
-     "сбор браузерных профилей"),
-    (r"wallet\.dat|MetaMask|Exodus|Atomic|Electrum|keystore",
-     "сбор крипто-кошельков"),
+    (r"\.ssh/(id_rsa|id_ed25519|authorized_keys|known_hosts)", "доступ к SSH-ключам хоста"),
+    (r"\.aws/credentials|\.aws/config", "доступ к AWS credentials"),
+    (r"/etc/(shadow|passwd|sudoers)", "чтение системных файлов"),
+    (
+        r"~/\.config/(google-chrome|chromium|Mozilla|BraveSoftware|Microsoft/Edge)",
+        "сбор браузерных данных",
+    ),
+    (r"Login Data|Cookies|Web Data|Local State", "сбор браузерных профилей"),
+    (r"wallet\.dat|MetaMask|Exodus|Atomic|Electrum|keystore", "сбор крипто-кошельков"),
     # Note: "subprocess + shell-util" is split across two patterns to keep the regex simple.
-    (r"\bos\.(system|popen)\s*\(",
-     "вызов os.system/os.popen"),
-    (r"socket\.(SOCK_RAW|AF_PACKET)",
-     "raw-сокеты"),
-    (r"\bos\.(setuid|setgid|chroot|fork)\b",
-     "понижение/повышение привилегий"),
-    (r"\bctypes\.(CDLL|WinDLL|cdll|windll)\b",
-     "загрузка нативных библиотек"),
-    (r"\b(ptrace|/proc/\d+/(mem|maps|cmdline))\b",
-     "обращение к памяти других процессов"),
+    (r"\bos\.(system|popen)\s*\(", "вызов os.system/os.popen"),
+    (r"socket\.(SOCK_RAW|AF_PACKET)", "raw-сокеты"),
+    (r"\bos\.(setuid|setgid|chroot|fork)\b", "понижение/повышение привилегий"),
+    (r"\bctypes\.(CDLL|WinDLL|cdll|windll)\b", "загрузка нативных библиотек"),
+    (r"\b(ptrace|/proc/\d+/(mem|maps|cmdline))\b", "обращение к памяти других процессов"),
 ]
 
 # Flagging "import os.environ" by name is too broad; we deny only direct dumps.

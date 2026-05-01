@@ -113,7 +113,9 @@ async def _maybe_install_deps(
     except Exception:
         pass
     if not ok:
-        await message.answer(f"{e.CROSS} Не удалось установить зависимости:\n<pre>{log[-1500:]}</pre>")
+        await message.answer(
+            f"{e.CROSS} Не удалось установить зависимости:\n<pre>{log[-1500:]}</pre>"
+        )
         return False
     await message.answer(f"{e.CHECK} Зависимости установлены.")
     return True
@@ -146,9 +148,7 @@ async def _process_payload(
             except OSError:
                 pass
         target_dir.mkdir(parents=True, exist_ok=True)
-        result: BundleResult = await extract_zip(
-            archive_bytes=zip_bytes, target_dir=target_dir
-        )
+        result: BundleResult = await extract_zip(archive_bytes=zip_bytes, target_dir=target_dir)
         if not result.ok:
             await message.answer(f"{e.CROSS} {result.error}")
             return
@@ -219,9 +219,7 @@ async def handle_document(
     is_zip = _is_zip(name)
     is_py = _is_py(name)
     if not (is_zip or is_py):
-        await message.answer(
-            f"{e.CROSS} Нужен файл <code>.py</code> или архив <code>.zip</code>."
-        )
+        await message.answer(f"{e.CROSS} Нужен файл <code>.py</code> или архив <code>.zip</code>.")
         return
 
     raw = await _download_bytes(

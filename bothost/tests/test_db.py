@@ -237,11 +237,11 @@ def test_bundle_rejects_path_traversal(tmp_path: Path) -> None:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("../evil.py", b"x")
-    result = asyncio.run(
-        extract_zip(archive_bytes=buf.getvalue(), target_dir=tmp_path / "x")
-    )
+    result = asyncio.run(extract_zip(archive_bytes=buf.getvalue(), target_dir=tmp_path / "x"))
     assert not result.ok
-    assert result.error is not None and ".." in result.error or "путь" in (result.error or "").lower()
+    assert (
+        result.error is not None and ".." in result.error or "путь" in (result.error or "").lower()
+    )
 
 
 def test_bundle_rejects_vcs_requirement(tmp_path: Path) -> None:
@@ -254,8 +254,6 @@ def test_bundle_rejects_vcs_requirement(tmp_path: Path) -> None:
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("bot.py", b"print('hi')\n")
         zf.writestr("requirements.txt", b"git+https://github.com/x/y.git\n")
-    result = asyncio.run(
-        extract_zip(archive_bytes=buf.getvalue(), target_dir=tmp_path / "y")
-    )
+    result = asyncio.run(extract_zip(archive_bytes=buf.getvalue(), target_dir=tmp_path / "y"))
     assert not result.ok
     assert "VCS" in (result.error or "")
