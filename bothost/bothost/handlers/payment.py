@@ -77,7 +77,7 @@ async def on_successful_payment(message: Message, cfg: Config, db: Database) -> 
     if plan is None:
         logger.error("payment for unknown plan_id=%s", plan_id)
         await message.answer(
-            f"{e.CROSS} Оплата получена, но тариф не найден в конфиге. Свяжитесь с администратором."
+            f"{e.CROSS} Оплата получена, но тариф не найден в конфиге. {cfg.admin_contact_html()}."
         )
         return
     sub = await db.apply_payment(
