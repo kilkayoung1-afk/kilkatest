@@ -71,7 +71,12 @@ async def _start_and_report(
 ) -> None:
     try:
         cid = await runner.start(
-            tg_id=record.tg_id, bot_id=record.id, container_name=record.container_name
+            tg_id=record.tg_id,
+            bot_id=record.id,
+            container_name=record.container_name,
+            mem_mb=record.mem_mb,
+            cpu_quota=record.cpu_quota,
+            fsize_mb=record.fsize_mb,
         )
     except Exception as exc:
         logger.exception("failed to start bot %s", record.id)
@@ -323,12 +328,23 @@ async def receive_bot_name(
         bytes.fromhex(pending_zip_hex) if isinstance(pending_zip_hex, str) else None
     )
 
+    sub = await db.get_subscription(user.id)
+    if sub is None or not sub.is_active():
+        await state.clear()
+        await message.answer(f"{e.CROSS} Подписка истекла пока ты выбирал имя. Купи тариф заново.")
+        return
+
     container_name_placeholder = f"bothost_user_{user.id}_pending_{name}"
     record = await db.create_bot(
         tg_id=user.id,
         name=name,
         file_path="",
         container_name=container_name_placeholder,
+        plan_id=sub.plan_id,
+        mem_mb=sub.mem_mb,
+        cpu_quota=sub.cpu_quota,
+        disk_mb=sub.disk_mb,
+        fsize_mb=sub.fsize_mb,
     )
     real_container_name = make_container_name(user.id, record.id)
     await db.set_container_name(bot_id=record.id, container_name=real_container_name)

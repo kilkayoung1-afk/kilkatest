@@ -73,12 +73,21 @@ async def cmd_extend(message: Message, command: CommandObject, cfg: Config, db: 
     except ValueError:
         await message.answer("Неверные аргументы.")
         return
+    existing = await db.get_subscription(target)
+    keep_mem = existing.mem_mb if existing else 256
+    keep_cpu = existing.cpu_quota if existing else 0.5
+    keep_disk = existing.disk_mb if existing else 100
+    keep_fsize = existing.fsize_mb if existing else 50
     sub = await db.apply_payment(
         tg_id=target,
         plan_id="admin-extend",
         paid_stars=0,
         days=days,
         bots=bots,
+        mem_mb=keep_mem,
+        cpu_quota=keep_cpu,
+        disk_mb=keep_disk,
+        fsize_mb=keep_fsize,
         payment_charge_id=None,
     )
     await message.answer(
@@ -119,11 +128,16 @@ async def cmd_grant(
 
     second = args[1]
     plan = find_plan(cfg.plans, second)
+    existing = await db.get_subscription(target)
     if plan is not None:
         days = plan.days
         bots = plan.bots
         plan_id = f"admin-grant-{plan.id}"
-        label = f"{plan.name} ({plan.bots} бот{'' if plan.bots == 1 else 'а' if 2 <= plan.bots <= 4 else 'ов'} на {plan.days} дн)"
+        mem_mb = plan.mem_mb
+        cpu_quota = plan.cpu_quota
+        disk_mb = plan.disk_mb
+        fsize_mb = plan.fsize_mb
+        label = f"{plan.name} ({plan.short_resources()} на {plan.days} дн)"
     else:
         try:
             days = int(second)
@@ -146,9 +160,12 @@ async def cmd_grant(
                 await message.answer("Квота должна быть >= 1.")
                 return
         else:
-            existing = await db.get_subscription(target)
             bots = existing.bot_quota if existing else 1
         plan_id = "admin-grant-custom"
+        mem_mb = existing.mem_mb if existing else 256
+        cpu_quota = existing.cpu_quota if existing else 0.5
+        disk_mb = existing.disk_mb if existing else 100
+        fsize_mb = existing.fsize_mb if existing else 50
         label = f"{days} дн, квота {bots}"
 
     await db.upsert_user(target, None)
@@ -158,6 +175,10 @@ async def cmd_grant(
         paid_stars=0,
         days=days,
         bots=bots,
+        mem_mb=mem_mb,
+        cpu_quota=cpu_quota,
+        disk_mb=disk_mb,
+        fsize_mb=fsize_mb,
         payment_charge_id=None,
     )
     await message.answer(

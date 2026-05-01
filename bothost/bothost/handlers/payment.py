@@ -49,8 +49,8 @@ async def cb_buy_plan(call: CallbackQuery, cfg: Config) -> None:
     await call.message.answer_invoice(
         title=f"bothost · {plan.name}",
         description=(
-            f"{plan.bots} {'бот' if plan.bots == 1 else 'ботов'} на {plan.days} дней. "
-            "Покупки складываются: квота берётся максимальной, дни прибавляются."
+            f"1 бот: {plan.short_resources()} на {plan.days} дней. "
+            "Покупки складываются: ресурсы берутся максимальные, дни прибавляются."
         ),
         payload=f"plan:{plan.id}",
         currency="XTR",
@@ -86,21 +86,27 @@ async def on_successful_payment(message: Message, cfg: Config, db: Database) -> 
         paid_stars=payment.total_amount,
         days=plan.days,
         bots=plan.bots,
+        mem_mb=plan.mem_mb,
+        cpu_quota=plan.cpu_quota,
+        disk_mb=plan.disk_mb,
+        fsize_mb=plan.fsize_mb,
         payment_charge_id=payment.telegram_payment_charge_id,
     )
     logger.info(
-        "user %s paid %s⭐ on plan=%s, sub now: quota=%s expires=%s",
+        "user %s paid %s⭐ on plan=%s, sub now: mem=%s cpu=%s disk=%s expires=%s",
         user.id,
         payment.total_amount,
         plan.id,
-        sub.bot_quota,
+        sub.mem_mb,
+        sub.cpu_quota,
+        sub.disk_mb,
         sub.expires_at.isoformat(),
     )
     await message.answer(
         f"{e.CHECK} Оплата получена!\n"
         f"{e.CALENDAR} Подписка активна до "
         f"<b>{sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}</b>\n"
-        f"{e.TAG} Лимит ботов: <b>{sub.bot_quota}</b>\n\n"
+        f"{e.TAG} Лимиты бота: <b>{plan.short_resources()}</b>\n\n"
         f"{e.PAPERCLIP} Можешь загружать <code>.py</code> или <code>.zip</code> файлы — "
         f"кнопка «Загрузить» снизу.",
         reply_markup=reply_keyboard(),

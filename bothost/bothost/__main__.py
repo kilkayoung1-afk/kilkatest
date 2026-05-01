@@ -46,7 +46,7 @@ async def _run() -> None:
     dp["runner"] = runner
     register(dp)
 
-    expiration = ExpirationService(db=db, runner=runner, bot=bot)
+    expiration = ExpirationService(db=db, runner=runner, bot=bot, cfg=cfg)
     expiration.start()
 
     me = await bot.get_me()

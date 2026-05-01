@@ -83,10 +83,25 @@ class BotRunner:
             else:
                 entry.unlink(missing_ok=True)
 
-    async def start(self, *, tg_id: int, bot_id: int, container_name: str) -> str:
+    async def start(
+        self,
+        *,
+        tg_id: int,
+        bot_id: int,
+        container_name: str,
+        mem_mb: int | None = None,
+        cpu_quota: float | None = None,
+        fsize_mb: int | None = None,
+    ) -> str:
         await self._stop_blocking_async(container_name, remove=True)
         return await asyncio.to_thread(
-            self._start_blocking, tg_id=tg_id, bot_id=bot_id, container_name=container_name
+            self._start_blocking,
+            tg_id=tg_id,
+            bot_id=bot_id,
+            container_name=container_name,
+            mem_mb=mem_mb,
+            cpu_quota=cpu_quota,
+            fsize_mb=fsize_mb,
         )
 
     async def stop(self, container_name: str, *, remove: bool = True) -> bool:
@@ -111,15 +126,22 @@ class BotRunner:
 
     # --- blocking helpers ---
 
-    def _start_blocking(self, *, tg_id: int, bot_id: int, container_name: str) -> str:
+    def _start_blocking(
+        self,
+        *,
+        tg_id: int,
+        bot_id: int,
+        container_name: str,
+        mem_mb: int | None,
+        cpu_quota: float | None,
+        fsize_mb: int | None,
+    ) -> str:
         user_dir = self._user_dir(tg_id, bot_id)
         bot_file = user_dir / "bot.py"
         if not bot_file.exists():
             raise FileNotFoundError(f"User script not found: {bot_file}")
         data_dir = user_dir / "data"
         data_dir.mkdir(exist_ok=True)
-        # User container runs as `nobody` (uid 65534) so the writable mount
-        # must be world-writable. We don't chown to keep parent permissions intact.
         try:
             data_dir.chmod(0o777)
         except OSError:
@@ -127,23 +149,32 @@ class BotRunner:
         host_user_dir = self._user_dir_host(tg_id, bot_id)
         host_data_dir = host_user_dir / "data"
 
-        try:
-            cpus = float(self._config.user_bot_cpus)
-        except ValueError:
-            cpus = 0.5
-        nano_cpus = int(cpus * 1e9)
+        # Prefer per-bot resources from the active subscription; fall back to
+        # config defaults when called from legacy code paths or admin tools.
+        if cpu_quota is None:
+            try:
+                cpu_quota = float(self._config.user_bot_cpus)
+            except ValueError:
+                cpu_quota = 0.5
+        nano_cpus = int(cpu_quota * 1e9)
+
+        if mem_mb is None or mem_mb <= 0:
+            mem_limit = self._config.user_bot_memory
+        else:
+            mem_limit = f"{mem_mb}m"
+
+        fsize_bytes = (fsize_mb or 50) * 1_000_000
 
         env = {
             "PYTHONUNBUFFERED": "1",
             "PYTHONDONTWRITEBYTECODE": "1",
-            # Make user-installed deps importable; site-packages is inside /app/data.
             "PYTHONPATH": "/app/data/site-packages:/app",
             "HOME": "/app/data",
         }
         ulimits = [
             docker.types.Ulimit(name="nofile", soft=256, hard=512),
             docker.types.Ulimit(name="nproc", soft=64, hard=128),
-            docker.types.Ulimit(name="fsize", soft=50_000_000, hard=50_000_000),
+            docker.types.Ulimit(name="fsize", soft=fsize_bytes, hard=fsize_bytes),
         ]
 
         try:
@@ -158,8 +189,8 @@ class BotRunner:
                 detach=True,
                 user="65534:65534",
                 environment=env,
-                mem_limit=self._config.user_bot_memory,
-                memswap_limit=self._config.user_bot_memory,
+                mem_limit=mem_limit,
+                memswap_limit=mem_limit,
                 nano_cpus=nano_cpus,
                 cap_drop=["ALL"],
                 security_opt=["no-new-privileges:true"],
@@ -173,13 +204,23 @@ class BotRunner:
                     "managed-by": "bothost",
                     "user-tg-id": str(tg_id),
                     "bot-id": str(bot_id),
+                    "mem-mb": str(mem_mb or 0),
+                    "cpu-quota": f"{cpu_quota:g}",
                 },
             )
         except APIError:
             logger.exception("docker run failed for user %s bot %s", tg_id, bot_id)
             raise
 
-        logger.info("started bot %s for user %s as container %s", bot_id, tg_id, container.id)
+        logger.info(
+            "started bot %s for user %s as container %s (mem=%sm cpu=%s fsize=%sMB)",
+            bot_id,
+            tg_id,
+            container.id,
+            mem_mb,
+            cpu_quota,
+            fsize_mb,
+        )
         return container.id or ""
 
     def _stop_blocking(self, container_name: str, remove: bool) -> bool:

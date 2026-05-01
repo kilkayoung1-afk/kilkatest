@@ -33,17 +33,39 @@ def test_subscription_lifecycle(db_path: Path) -> None:
         assert sub is None
 
         sub = await db.apply_payment(
-            tg_id=1, plan_id="start", paid_stars=50, days=14, bots=1, payment_charge_id="x"
+            tg_id=1,
+            plan_id="start",
+            paid_stars=50,
+            days=14,
+            bots=1,
+            mem_mb=256,
+            cpu_quota=0.25,
+            disk_mb=100,
+            fsize_mb=25,
+            payment_charge_id="x",
         )
         assert sub.bot_quota == 1
         assert sub.total_paid_stars == 50
+        assert sub.mem_mb == 256
         assert sub.expires_at > datetime.now(UTC)
 
-        # second payment of a bigger plan stacks days and increases quota
+        # second payment of a bigger plan stacks days and bumps resources to the max
         sub2 = await db.apply_payment(
-            tg_id=1, plan_id="plus", paid_stars=130, days=14, bots=3, payment_charge_id="y"
+            tg_id=1,
+            plan_id="plus",
+            paid_stars=130,
+            days=14,
+            bots=1,
+            mem_mb=512,
+            cpu_quota=0.5,
+            disk_mb=300,
+            fsize_mb=50,
+            payment_charge_id="y",
         )
-        assert sub2.bot_quota == 3
+        assert sub2.bot_quota == 1
+        assert sub2.mem_mb == 512
+        assert sub2.cpu_quota == 0.5
+        assert sub2.disk_mb == 300
         assert sub2.total_paid_stars == 50 + 130
         assert sub2.expires_at > sub.expires_at + timedelta(days=13)
 
@@ -57,7 +79,16 @@ def test_apply_payment_when_expired_starts_from_now(db_path: Path) -> None:
         await db.upsert_user(2, "bob")
 
         sub = await db.apply_payment(
-            tg_id=2, plan_id="start", paid_stars=50, days=14, bots=1, payment_charge_id=None
+            tg_id=2,
+            plan_id="start",
+            paid_stars=50,
+            days=14,
+            bots=1,
+            mem_mb=256,
+            cpu_quota=0.25,
+            disk_mb=100,
+            fsize_mb=25,
+            payment_charge_id=None,
         )
         # force-expire
         import aiosqlite
@@ -69,7 +100,16 @@ def test_apply_payment_when_expired_starts_from_now(db_path: Path) -> None:
             )
             await conn.commit()
         sub2 = await db.apply_payment(
-            tg_id=2, plan_id="start", paid_stars=50, days=14, bots=1, payment_charge_id=None
+            tg_id=2,
+            plan_id="start",
+            paid_stars=50,
+            days=14,
+            bots=1,
+            mem_mb=256,
+            cpu_quota=0.25,
+            disk_mb=100,
+            fsize_mb=25,
+            payment_charge_id=None,
         )
         assert sub2.expires_at > datetime.now(UTC) + timedelta(days=13)
 
@@ -84,10 +124,28 @@ def test_total_paid_stars(db_path: Path) -> None:
         await db.init()
         await db.upsert_user(3, "c")
         await db.apply_payment(
-            tg_id=3, plan_id="start", paid_stars=50, days=14, bots=1, payment_charge_id=None
+            tg_id=3,
+            plan_id="start",
+            paid_stars=50,
+            days=14,
+            bots=1,
+            mem_mb=256,
+            cpu_quota=0.25,
+            disk_mb=100,
+            fsize_mb=25,
+            payment_charge_id=None,
         )
         await db.apply_payment(
-            tg_id=3, plan_id="plus", paid_stars=130, days=14, bots=3, payment_charge_id=None
+            tg_id=3,
+            plan_id="plus",
+            paid_stars=130,
+            days=14,
+            bots=1,
+            mem_mb=512,
+            cpu_quota=0.5,
+            disk_mb=300,
+            fsize_mb=50,
+            payment_charge_id=None,
         )
         assert await db.total_paid_stars() == 50 + 130
 
@@ -100,9 +158,19 @@ def test_bot_crud(db_path: Path) -> None:
         await db.init()
         await db.upsert_user(10, "dave")
         rec = await db.create_bot(
-            tg_id=10, name="bot1", file_path="/tmp/bot.py", container_name="placeholder_1"
+            tg_id=10,
+            name="bot1",
+            file_path="/tmp/bot.py",
+            container_name="placeholder_1",
+            plan_id="start",
+            mem_mb=256,
+            cpu_quota=0.25,
+            disk_mb=100,
+            fsize_mb=25,
         )
         assert rec.status == "stopped"
+        assert rec.mem_mb == 256
+        assert rec.disk_mb == 100
         await db.set_container_name(bot_id=rec.id, container_name="bothost_user_10_1")
         await db.update_bot_status(bot_id=rec.id, status="running", container_id="abc")
         fresh = await db.get_bot_by_id(rec.id)
@@ -130,7 +198,16 @@ def test_admin_extend(db_path: Path) -> None:
         await db.init()
         await db.upsert_user(20, "x")
         sub = await db.apply_payment(
-            tg_id=20, plan_id="admin", paid_stars=0, days=7, bots=2, payment_charge_id=None
+            tg_id=20,
+            plan_id="admin",
+            paid_stars=0,
+            days=7,
+            bots=2,
+            mem_mb=512,
+            cpu_quota=0.5,
+            disk_mb=300,
+            fsize_mb=50,
+            payment_charge_id=None,
         )
         assert sub.total_paid_stars == 0
         assert sub.bot_quota == 2
@@ -146,9 +223,23 @@ def test_plans_default() -> None:
 
 
 def test_plan_label_format() -> None:
-    plan = Plan(id="start", name="Старт", stars=50, days=14, bots=1)
-    assert "50⭐" in plan.label()
-    assert "14 дн" in plan.label()
+    plan = Plan(
+        id="start",
+        name="Старт",
+        stars=50,
+        days=14,
+        bots=1,
+        mem_mb=256,
+        cpu_quota=0.25,
+        disk_mb=100,
+        fsize_mb=25,
+    )
+    label = plan.label()
+    assert "50⭐" in label
+    assert "14 дн" in label
+    assert "256" in label
+    assert "CPU" in label
+    assert "диск" in label
 
 
 @pytest.mark.parametrize(

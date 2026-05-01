@@ -20,6 +20,11 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     expires_at TEXT NOT NULL,
     bot_quota INTEGER NOT NULL,
     total_paid_stars INTEGER NOT NULL DEFAULT 0,
+    plan_id TEXT NOT NULL DEFAULT '',
+    mem_mb INTEGER NOT NULL DEFAULT 256,
+    cpu_quota REAL NOT NULL DEFAULT 0.5,
+    disk_mb INTEGER NOT NULL DEFAULT 100,
+    fsize_mb INTEGER NOT NULL DEFAULT 50,
     updated_at TEXT NOT NULL
 );
 
@@ -49,10 +54,27 @@ CREATE TABLE IF NOT EXISTS bots (
     stopped_at TEXT,
     last_error TEXT,
     created_at TEXT NOT NULL,
+    plan_id TEXT NOT NULL DEFAULT '',
+    mem_mb INTEGER NOT NULL DEFAULT 256,
+    cpu_quota REAL NOT NULL DEFAULT 0.5,
+    disk_mb INTEGER NOT NULL DEFAULT 100,
+    fsize_mb INTEGER NOT NULL DEFAULT 50,
     UNIQUE(tg_id, name)
 );
 CREATE INDEX IF NOT EXISTS idx_bots_tg_id ON bots(tg_id);
 """
+
+# Migrations applied on every init() to grow legacy schemas with the resource
+# columns added in the resource-tier model. SQLite has no IF NOT EXISTS for
+# ADD COLUMN, so we read existing columns first and only add what's missing.
+_BOT_RESOURCE_COLUMNS: list[tuple[str, str]] = [
+    ("plan_id", "TEXT NOT NULL DEFAULT ''"),
+    ("mem_mb", "INTEGER NOT NULL DEFAULT 256"),
+    ("cpu_quota", "REAL NOT NULL DEFAULT 0.5"),
+    ("disk_mb", "INTEGER NOT NULL DEFAULT 100"),
+    ("fsize_mb", "INTEGER NOT NULL DEFAULT 50"),
+]
+_SUB_RESOURCE_COLUMNS: list[tuple[str, str]] = list(_BOT_RESOURCE_COLUMNS)
 
 
 def _now() -> str:
@@ -71,6 +93,11 @@ class Subscription:
     expires_at: datetime
     bot_quota: int
     total_paid_stars: int
+    plan_id: str = ""
+    mem_mb: int = 256
+    cpu_quota: float = 0.5
+    disk_mb: int = 100
+    fsize_mb: int = 50
 
     def is_active(self, *, at: datetime | None = None) -> bool:
         return self.expires_at > (at or datetime.now(UTC))
@@ -89,6 +116,11 @@ class BotRecord:
     stopped_at: datetime | None
     last_error: str | None
     created_at: datetime
+    plan_id: str = ""
+    mem_mb: int = 256
+    cpu_quota: float = 0.5
+    disk_mb: int = 100
+    fsize_mb: int = 50
 
 
 class Database:
@@ -101,7 +133,23 @@ class Database:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self._path) as db:
             await db.executescript(SCHEMA)
+            await self._migrate_resource_columns(db, "bots", _BOT_RESOURCE_COLUMNS)
+            await self._migrate_resource_columns(db, "subscriptions", _SUB_RESOURCE_COLUMNS)
             await db.commit()
+
+    @staticmethod
+    async def _migrate_resource_columns(
+        db: aiosqlite.Connection,
+        table: str,
+        columns: list[tuple[str, str]],
+    ) -> None:
+        async with db.execute(f"PRAGMA table_info({table})") as cur:
+            existing_rows = await cur.fetchall()
+        existing = {str(row[1]) for row in existing_rows}
+        for col, decl in columns:
+            if col in existing:
+                continue
+            await db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
 
     # ---- users ----
 
@@ -131,7 +179,11 @@ class Database:
         async with (
             aiosqlite.connect(self._path) as db,
             db.execute(
-                "SELECT tg_id, expires_at, bot_quota, total_paid_stars FROM subscriptions WHERE tg_id = ?",
+                """
+                SELECT tg_id, expires_at, bot_quota, total_paid_stars,
+                       plan_id, mem_mb, cpu_quota, disk_mb, fsize_mb
+                FROM subscriptions WHERE tg_id = ?
+                """,
                 (tg_id,),
             ) as cursor,
         ):
@@ -145,6 +197,11 @@ class Database:
             expires_at=expires,
             bot_quota=int(row[2]),
             total_paid_stars=int(row[3]),
+            plan_id=str(row[4] or ""),
+            mem_mb=int(row[5]),
+            cpu_quota=float(row[6]),
+            disk_mb=int(row[7]),
+            fsize_mb=int(row[8]),
         )
 
     async def apply_payment(
@@ -155,11 +212,16 @@ class Database:
         paid_stars: int,
         days: int,
         bots: int,
+        mem_mb: int,
+        cpu_quota: float,
+        disk_mb: int,
+        fsize_mb: int,
         payment_charge_id: str | None,
     ) -> Subscription:
         """Apply a new payment to the user's subscription.
 
-        Rules: expires_at = max(current, now) + days; bot_quota = max(current, plan.bots).
+        Rules: expires_at = max(current, now) + days; resource fields take the
+        max of (current, plan), so buying a smaller plan never downgrades.
         """
 
         now = datetime.now(UTC)
@@ -167,7 +229,11 @@ class Database:
             await db.execute("BEGIN")
             try:
                 async with db.execute(
-                    "SELECT expires_at, bot_quota, total_paid_stars FROM subscriptions WHERE tg_id = ?",
+                    """
+                    SELECT expires_at, bot_quota, total_paid_stars,
+                           plan_id, mem_mb, cpu_quota, disk_mb, fsize_mb
+                    FROM subscriptions WHERE tg_id = ?
+                    """,
                     (tg_id,),
                 ) as cursor:
                     row = await cursor.fetchone()
@@ -177,24 +243,61 @@ class Database:
                     new_expiry = base + timedelta(days=days)
                     new_quota = max(int(row[1]), bots)
                     new_total = int(row[2]) + paid_stars
+                    new_mem = max(int(row[4]), mem_mb)
+                    new_cpu = max(float(row[5]), cpu_quota)
+                    new_disk = max(int(row[6]), disk_mb)
+                    new_fsize = max(int(row[7]), fsize_mb)
+                    new_plan_id = plan_id if new_mem == mem_mb else str(row[3] or plan_id)
                     await db.execute(
                         """
                         UPDATE subscriptions
-                        SET expires_at = ?, bot_quota = ?, total_paid_stars = ?, updated_at = ?
+                        SET expires_at = ?, bot_quota = ?, total_paid_stars = ?,
+                            plan_id = ?, mem_mb = ?, cpu_quota = ?,
+                            disk_mb = ?, fsize_mb = ?, updated_at = ?
                         WHERE tg_id = ?
                         """,
-                        (new_expiry.isoformat(), new_quota, new_total, _now(), tg_id),
+                        (
+                            new_expiry.isoformat(),
+                            new_quota,
+                            new_total,
+                            new_plan_id,
+                            new_mem,
+                            new_cpu,
+                            new_disk,
+                            new_fsize,
+                            _now(),
+                            tg_id,
+                        ),
                     )
                 else:
                     new_expiry = now + timedelta(days=days)
                     new_quota = bots
                     new_total = paid_stars
+                    new_mem = mem_mb
+                    new_cpu = cpu_quota
+                    new_disk = disk_mb
+                    new_fsize = fsize_mb
+                    new_plan_id = plan_id
                     await db.execute(
                         """
-                        INSERT INTO subscriptions (tg_id, expires_at, bot_quota, total_paid_stars, updated_at)
-                        VALUES (?, ?, ?, ?, ?)
+                        INSERT INTO subscriptions (
+                            tg_id, expires_at, bot_quota, total_paid_stars,
+                            plan_id, mem_mb, cpu_quota, disk_mb, fsize_mb, updated_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (tg_id, new_expiry.isoformat(), new_quota, new_total, _now()),
+                        (
+                            tg_id,
+                            new_expiry.isoformat(),
+                            new_quota,
+                            new_total,
+                            new_plan_id,
+                            new_mem,
+                            new_cpu,
+                            new_disk,
+                            new_fsize,
+                            _now(),
+                        ),
                     )
                 await db.execute(
                     """
@@ -212,6 +315,11 @@ class Database:
             expires_at=new_expiry,
             bot_quota=new_quota,
             total_paid_stars=new_total,
+            plan_id=new_plan_id,
+            mem_mb=new_mem,
+            cpu_quota=new_cpu,
+            disk_mb=new_disk,
+            fsize_mb=new_fsize,
         )
 
     async def list_active_subscriptions(self) -> list[Subscription]:
@@ -219,7 +327,8 @@ class Database:
             aiosqlite.connect(self._path) as db,
             db.execute(
                 """
-            SELECT tg_id, expires_at, bot_quota, total_paid_stars
+            SELECT tg_id, expires_at, bot_quota, total_paid_stars,
+                   plan_id, mem_mb, cpu_quota, disk_mb, fsize_mb
             FROM subscriptions
             WHERE expires_at > ?
             ORDER BY expires_at ASC
@@ -238,6 +347,11 @@ class Database:
                     expires_at=expires,
                     bot_quota=int(row[2]),
                     total_paid_stars=int(row[3]),
+                    plan_id=str(row[4] or ""),
+                    mem_mb=int(row[5]),
+                    cpu_quota=float(row[6]),
+                    disk_mb=int(row[7]),
+                    fsize_mb=int(row[8]),
                 )
             )
         return result
@@ -259,14 +373,33 @@ class Database:
         name: str,
         file_path: str,
         container_name: str,
+        plan_id: str,
+        mem_mb: int,
+        cpu_quota: float,
+        disk_mb: int,
+        fsize_mb: int,
     ) -> BotRecord:
         async with aiosqlite.connect(self._path) as db:
             cursor = await db.execute(
                 """
-                INSERT INTO bots (tg_id, name, file_path, container_name, status, created_at)
-                VALUES (?, ?, ?, ?, 'stopped', ?)
+                INSERT INTO bots (
+                    tg_id, name, file_path, container_name, status, created_at,
+                    plan_id, mem_mb, cpu_quota, disk_mb, fsize_mb
+                )
+                VALUES (?, ?, ?, ?, 'stopped', ?, ?, ?, ?, ?, ?)
                 """,
-                (tg_id, name, file_path, container_name, _now()),
+                (
+                    tg_id,
+                    name,
+                    file_path,
+                    container_name,
+                    _now(),
+                    plan_id,
+                    mem_mb,
+                    cpu_quota,
+                    disk_mb,
+                    fsize_mb,
+                ),
             )
             bot_id = cursor.lastrowid
             await db.commit()
@@ -274,6 +407,27 @@ class Database:
         record = await self.get_bot_by_id(bot_id)
         assert record is not None
         return record
+
+    async def update_bot_resources(
+        self,
+        *,
+        bot_id: int,
+        plan_id: str,
+        mem_mb: int,
+        cpu_quota: float,
+        disk_mb: int,
+        fsize_mb: int,
+    ) -> None:
+        async with aiosqlite.connect(self._path) as db:
+            await db.execute(
+                """
+                UPDATE bots
+                SET plan_id = ?, mem_mb = ?, cpu_quota = ?, disk_mb = ?, fsize_mb = ?
+                WHERE id = ?
+                """,
+                (plan_id, mem_mb, cpu_quota, disk_mb, fsize_mb, bot_id),
+            )
+            await db.commit()
 
     async def update_bot_status(
         self,
@@ -333,14 +487,7 @@ class Database:
     async def get_bot_by_id(self, bot_id: int) -> BotRecord | None:
         async with (
             aiosqlite.connect(self._path) as db,
-            db.execute(
-                """
-            SELECT id, tg_id, name, file_path, container_id, container_name, status,
-                   started_at, stopped_at, last_error, created_at
-            FROM bots WHERE id = ?
-            """,
-                (bot_id,),
-            ) as cursor,
+            db.execute(_SELECT_BOT + " WHERE id = ?", (bot_id,)) as cursor,
         ):
             row = await cursor.fetchone()
         if not row:
@@ -350,14 +497,7 @@ class Database:
     async def get_bot_by_name(self, tg_id: int, name: str) -> BotRecord | None:
         async with (
             aiosqlite.connect(self._path) as db,
-            db.execute(
-                """
-            SELECT id, tg_id, name, file_path, container_id, container_name, status,
-                   started_at, stopped_at, last_error, created_at
-            FROM bots WHERE tg_id = ? AND name = ?
-            """,
-                (tg_id, name),
-            ) as cursor,
+            db.execute(_SELECT_BOT + " WHERE tg_id = ? AND name = ?", (tg_id, name)) as cursor,
         ):
             row = await cursor.fetchone()
         if not row:
@@ -368,11 +508,7 @@ class Database:
         async with (
             aiosqlite.connect(self._path) as db,
             db.execute(
-                """
-            SELECT id, tg_id, name, file_path, container_id, container_name, status,
-                   started_at, stopped_at, last_error, created_at
-            FROM bots WHERE tg_id = ? ORDER BY created_at ASC
-            """,
+                _SELECT_BOT + " WHERE tg_id = ? ORDER BY created_at ASC",
                 (tg_id,),
             ) as cursor,
         ):
@@ -382,16 +518,18 @@ class Database:
     async def list_running_bots(self) -> list[BotRecord]:
         async with (
             aiosqlite.connect(self._path) as db,
-            db.execute(
-                """
-            SELECT id, tg_id, name, file_path, container_id, container_name, status,
-                   started_at, stopped_at, last_error, created_at
-            FROM bots WHERE status = 'running'
-            """
-            ) as cursor,
+            db.execute(_SELECT_BOT + " WHERE status = 'running'") as cursor,
         ):
             rows = await cursor.fetchall()
         return [_row_to_bot(row) for row in rows]
+
+
+_SELECT_BOT = """
+SELECT id, tg_id, name, file_path, container_id, container_name, status,
+       started_at, stopped_at, last_error, created_at,
+       plan_id, mem_mb, cpu_quota, disk_mb, fsize_mb
+FROM bots
+"""
 
 
 def _row_to_bot(row: aiosqlite.Row | tuple) -> BotRecord:  # type: ignore[type-arg]
@@ -409,4 +547,9 @@ def _row_to_bot(row: aiosqlite.Row | tuple) -> BotRecord:  # type: ignore[type-a
         stopped_at=_parse_dt(row[8]),
         last_error=row[9],
         created_at=created,
+        plan_id=str(row[11] or ""),
+        mem_mb=int(row[12]),
+        cpu_quota=float(row[13]),
+        disk_mb=int(row[14]),
+        fsize_mb=int(row[15]),
     )

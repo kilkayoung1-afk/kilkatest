@@ -26,6 +26,31 @@ logger = logging.getLogger(__name__)
 router = Router(name="manage")
 
 
+async def _sync_bot_to_sub(db: Database, record: BotRecord, sub: Subscription) -> BotRecord:
+    """Pick max(bot, sub) for each resource so an upgraded sub takes effect on next start."""
+    new_mem = max(record.mem_mb, sub.mem_mb)
+    new_cpu = max(record.cpu_quota, sub.cpu_quota)
+    new_disk = max(record.disk_mb, sub.disk_mb)
+    new_fsize = max(record.fsize_mb, sub.fsize_mb)
+    if (
+        new_mem == record.mem_mb
+        and new_cpu == record.cpu_quota
+        and new_disk == record.disk_mb
+        and new_fsize == record.fsize_mb
+    ):
+        return record
+    await db.update_bot_resources(
+        bot_id=record.id,
+        plan_id=sub.plan_id or record.plan_id,
+        mem_mb=new_mem,
+        cpu_quota=new_cpu,
+        disk_mb=new_disk,
+        fsize_mb=new_fsize,
+    )
+    fresh = await db.get_bot_by_id(record.id)
+    return fresh or record
+
+
 async def _show_bots_list(target: Message, *, cfg: Config, db: Database, tg_id: int) -> None:
     bots = await db.list_bots_for_user(tg_id)
     sub = await db.get_subscription(tg_id)
@@ -43,9 +68,21 @@ def _bots_header(sub: Subscription | None, count: int) -> str:
     if sub and sub.is_active():
         return (
             f"{e.BOT} <b>Ваши боты</b> ({count}/{sub.bot_quota})\n"
-            f"{e.CALENDAR} Активна до {sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}"
+            f"{e.CALENDAR} Активна до {sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}\n"
+            f"{e.TAG} Лимиты бота: {_resources_text(sub.mem_mb, sub.cpu_quota, sub.disk_mb)}"
         )
     return f"{e.BOT} <b>Ваши боты</b> ({count}). {e.CROSS} Подписка не активна."
+
+
+def _resources_text(mem_mb: int, cpu_quota: float, disk_mb: int) -> str:
+    def _fmt_mem(mb: int) -> str:
+        if mb >= 1024 and mb % 1024 == 0:
+            return f"{mb // 1024} ГБ"
+        if mb >= 1024:
+            return f"{mb / 1024:.1f} ГБ"
+        return f"{mb} МБ"
+
+    return f"{_fmt_mem(mem_mb)} RAM · {cpu_quota:g} CPU · {_fmt_mem(disk_mb)} диск"
 
 
 async def _show_single_bot(
@@ -65,6 +102,7 @@ async def _show_single_bot(
         f"{e.BOT} <b>{record.name}</b>",
         f"Статус: {record.status}",
         f"Создан: {record.created_at.strftime('%Y-%m-%d %H:%M UTC')}",
+        f"{e.TAG} Лимиты: {_resources_text(record.mem_mb, record.cpu_quota, record.disk_mb)}",
     ]
     if record.last_error:
         lines.append(f"{e.CROSS} Последняя ошибка:")
@@ -132,11 +170,15 @@ async def cb_bot_action(
         if sub is None or not sub.is_active():
             await call.answer("⚠️ Подписка не активна", show_alert=True)
             return
+        record = await _sync_bot_to_sub(db, record, sub)
         try:
             cid = await runner.start(
                 tg_id=record.tg_id,
                 bot_id=record.id,
                 container_name=record.container_name,
+                mem_mb=record.mem_mb,
+                cpu_quota=record.cpu_quota,
+                fsize_mb=record.fsize_mb,
             )
         except Exception as exc:
             logger.exception("start failed for bot %s", record.id)
@@ -171,12 +213,16 @@ async def cb_bot_action(
         if sub is None or not sub.is_active():
             await call.answer("⚠️ Подписка не активна", show_alert=True)
             return
+        record = await _sync_bot_to_sub(db, record, sub)
         await runner.stop(record.container_name, remove=True)
         try:
             cid = await runner.start(
                 tg_id=record.tg_id,
                 bot_id=record.id,
                 container_name=record.container_name,
+                mem_mb=record.mem_mb,
+                cpu_quota=record.cpu_quota,
+                fsize_mb=record.fsize_mb,
             )
         except Exception as exc:
             logger.exception("restart failed for bot %s", record.id)

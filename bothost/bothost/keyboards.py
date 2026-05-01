@@ -223,7 +223,19 @@ def status_lines(sub: Subscription | None, bots: list[BotRecord]) -> str:
             f"{e.CALENDAR} Подписка активна до "
             f"<b>{sub.expires_at.strftime('%Y-%m-%d %H:%M UTC')}</b>"
         )
-        lines.append(f"{e.TAG} Лимит ботов: <b>{sub.bot_quota}</b>")
+        mem_text = (
+            f"{sub.mem_mb // 1024} ГБ"
+            if sub.mem_mb >= 1024 and sub.mem_mb % 1024 == 0
+            else f"{sub.mem_mb} МБ"
+        )
+        disk_text = (
+            f"{sub.disk_mb // 1024} ГБ"
+            if sub.disk_mb >= 1024 and sub.disk_mb % 1024 == 0
+            else f"{sub.disk_mb} МБ"
+        )
+        lines.append(
+            f"{e.TAG} Лимиты бота: <b>{mem_text} RAM · {sub.cpu_quota:g} CPU · {disk_text} диск</b>"
+        )
         lines.append(f"{e.COIN} Всего оплачено: {sub.total_paid_stars}")
     else:
         lines.append(f"{e.CALENDAR} Подписка не активна. Нажми /buy.")
