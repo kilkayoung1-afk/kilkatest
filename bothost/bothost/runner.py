@@ -53,6 +53,7 @@ class BotRunner:
         def _write() -> Path:
             user_dir = self._user_dir(tg_id, bot_id)
             user_dir.mkdir(parents=True, exist_ok=True)
+            (user_dir / "data").mkdir(exist_ok=True)
             target = user_dir / "bot.py"
             target.write_bytes(source)
             return target
@@ -92,7 +93,10 @@ class BotRunner:
         bot_file = user_dir / "bot.py"
         if not bot_file.exists():
             raise FileNotFoundError(f"User script not found: {bot_file}")
+        data_dir = user_dir / "data"
+        data_dir.mkdir(exist_ok=True)
         host_user_dir = self._user_dir_host(tg_id, bot_id)
+        host_data_dir = host_user_dir / "data"
 
         try:
             cpus = float(self._config.user_bot_cpus)
@@ -106,6 +110,7 @@ class BotRunner:
                 name=container_name,
                 volumes={
                     str(host_user_dir): {"bind": "/app", "mode": "ro"},
+                    str(host_data_dir): {"bind": "/app/data", "mode": "rw"},
                 },
                 working_dir="/app",
                 detach=True,

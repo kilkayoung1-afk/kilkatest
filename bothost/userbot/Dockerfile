@@ -13,7 +13,15 @@ RUN pip install \
     "python-telegram-bot==21.6" \
     "requests==2.32.3" \
     "aiohttp==3.10.10" \
-    "httpx==0.27.2"
+    "httpx==0.27.2" \
+    "python-dotenv==1.0.1" \
+    "pydantic==2.9.2" \
+    "loguru==0.7.2" \
+    "orjson==3.10.7" \
+    "pyyaml==6.0.2" \
+    "beautifulsoup4==4.12.3" \
+    "lxml==5.3.0" \
+    "Pillow==10.4.0"
 
 WORKDIR /app
 
